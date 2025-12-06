@@ -1,3 +1,4 @@
+cat > app.py <<'PY'
 import argparse
 import json
 from datetime import datetime, timezone
@@ -38,9 +39,13 @@ def main():
 
     result = sup.run(args.task, memory)
 
-print(f"[solver: {result.get('solver_agent')} | tags: {result.get('critique_tags')}]")
-print(result["final"])
+    # короткий діагностичний рядок
+    solver = result.get("solver_agent")
+    tags = result.get("critique_tags")
+    if solver or tags:
+        print(f"[solver: {solver} | tags: {tags}]")
 
+    print(result["final"])
 
     if args.learn:
         tags = result.get("critique_tags", []) or []
@@ -52,3 +57,4 @@ print(result["final"])
 
 if __name__ == "__main__":
     main()
+PY
