@@ -1,6 +1,8 @@
 import argparse
 import json
 
+import agents  # тригерить agents/__init__.py і реєстрацію плагінів
+from agents.router import rank_agents
 from agents.supervisor import Supervisor
 from agents.registry import list_agents
 from memory.store import load_memory, save_memory, set_flag
@@ -22,7 +24,7 @@ def main():
     sup = Supervisor()
 
     print("Multi-agent chat. Type 'exit' to quit.")
-    print("Commands: /memory, /agents")
+    print("Commands: /memory, /agents, /route <task>")
 
     while True:
         task = input("\nYou: ").strip()
@@ -32,7 +34,7 @@ def main():
         if task.lower() in {"exit", "quit"}:
             break
 
-        # service commands
+        # --- service commands ---
         if task in {"/memory", ":memory"}:
             print(json.dumps(load_memory(), ensure_ascii=False, indent=2))
             continue
@@ -41,7 +43,20 @@ def main():
             print("Registered agents:", ", ".join(list_agents()))
             continue
 
-        # normal task
+        # --- routing preview ---
+        if task.startswith("/route"):
+            query = task[len("/route"):].strip()
+            if not query:
+                print("Usage: /route <task>")
+                continue
+
+            ranked = rank_agents(query, memory)
+            print("Routing scores:")
+            for name, score in ranked:
+                print(f" - {name}: {score:.2f}")
+            continue
+
+        # --- normal agent task ---
         result = sup.run(task, memory)
         print("\nAssistant:\n")
         print(result["final"])
