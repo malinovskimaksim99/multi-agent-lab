@@ -12,13 +12,18 @@ class Supervisor:
     def run(self, task: str, memory: Dict[str, Any]) -> Dict[str, Any]:
         plan = self.planner.plan(task)
         draft = self.analyst.draft(task, plan, memory)
-        critique = self.critic.review(draft)
-        final = self.analyst.revise(draft, critique)
+
+        structured = self.critic.review_structured(draft)
+        critique_text = "\n".join(f"- {n}" for n in structured["notes"])
+        tags = structured["tags"]
+
+        final = self.analyst.revise(draft, critique_text)
 
         return {
             "task": task,
             "plan": plan,
             "draft": draft,
-            "critique": critique,
+            "critique": critique_text,
+            "critique_tags": tags,
             "final": final,
         }
