@@ -4,10 +4,22 @@ from typing import Any, Dict
 
 MEMORY_PATH = Path("memory/memory.json")
 
+DEFAULT_MEMORY = {
+    "rules": [],
+    "examples": [],
+    "flags": {}
+}
+
 def load_memory() -> Dict[str, Any]:
     if MEMORY_PATH.exists():
-        return json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
-    return {"rules": [], "examples": []}
+        data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
+        # backward compatible merge
+        merged = {**DEFAULT_MEMORY, **data}
+        merged["flags"] = {**DEFAULT_MEMORY["flags"], **(data.get("flags") or {})}
+        merged["rules"] = data.get("rules") or []
+        merged["examples"] = data.get("examples") or []
+        return merged
+    return DEFAULT_MEMORY.copy()
 
 def save_memory(mem: Dict[str, Any]) -> None:
     MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -19,3 +31,7 @@ def save_memory(mem: Dict[str, Any]) -> None:
 def add_rule(mem: Dict[str, Any], rule: str) -> None:
     if rule not in mem["rules"]:
         mem["rules"].append(rule)
+
+def set_flag(mem: Dict[str, Any], key: str, value: Any = True) -> None:
+    mem.setdefault("flags", {})
+    mem["flags"][key] = value
