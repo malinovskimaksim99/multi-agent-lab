@@ -1,0 +1,14 @@
+{
+  "tasks": [
+    "Explain what a multi-agent system is in 5 bullet points.",
+    "Given a short paragraph, extract 3 key insights and 1 potential weakness.",
+    "Write a short plan for learning English effectively in 4 steps.",
+    "Summarize why logging is important for agent improvement.",
+    "Explain the difference between planning and critique in agent workflows.",
+    "Provide a concise checklist for starting a Python project.",
+    "Analyze this claim: 'More agents always means better results.' Provide pros/cons.",
+    "Suggest a structure for a technical README for an AI project.",
+    "Explain how simple memory rules can improve response quality.",
+    "Give 3 ways to evaluate an agent’s answer quality without humans."
+  ]
+}
