@@ -1,15 +1,23 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from .base import BaseAgent, AgentResult, Context, Memory
+from .registry import register_agent
+
 
 class Analyst:
     def draft(self, task: str, plan: List[str], memory: Dict[str, Any]) -> str:
         flags = memory.get("flags", {}) or {}
         force_structure = bool(flags.get("force_structure"))
+        expand_when_short = bool(flags.get("expand_when_short"))
 
         base_points = [
             "Identify the core request and constraints.",
             "Provide a concise answer with actionable points.",
             "Include a quick self-check for gaps."
         ]
+
+        if expand_when_short:
+            base_points.append("Add one short example or mini-checklist.")
+            base_points.append("State assumptions and limits of the answer.")
 
         if force_structure:
             body = (
@@ -29,6 +37,30 @@ class Analyst:
 
         return body
 
-    def revise(self, draft: str, critique: str) -> str:
-        # Simple revision pass
-        return draft + "\n\n## Revisions\n" + critique
+    def revise(self, draft: str, critique_text: str) -> str:
+        if "##" in draft:
+            return draft + "\n\n## Revisions\n" + critique_text
+        return draft + "\n\nRevisions:\n" + critique_text
+
+
+@register_agent
+class AnalystAgent(BaseAgent):
+    name = "analyst"
+    description = "Produces a draft answer using plan and memory flags."
+
+    def __init__(self):
+        self._analyst = Analyst()
+
+    def can_handle(self, task: str, context: Optional[Context] = None) -> float:
+        return 0.9
+
+    def run(self, task: str, memory: Memory, context: Optional[Context] = None) -> AgentResult:
+        plan = []
+        if context and isinstance(context.get("plan"), list):
+            plan = context["plan"]
+        draft = self._analyst.draft(task, plan, memory)
+        return AgentResult(agent=self.name, output=draft, meta={})
+
+    # щоб Supervisor міг красиво робити revise
+    def revise(self, draft: str, critique_text: str) -> str:
+        return self._analyst.revise(draft, critique_text)
