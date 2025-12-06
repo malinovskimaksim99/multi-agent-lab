@@ -18,10 +18,11 @@ def learn_from_tags(memory, tags):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--learn", action="store_true", help="Update memory flags after each task.")
+    parser.add_argument("--auto", action="store_true", help="Auto-pick best solver agent by router.")
     args = parser.parse_args()
 
     memory = load_memory()
-    sup = Supervisor()
+    sup = Supervisor(auto_solver=args.auto)
 
     print("Multi-agent chat. Type 'exit' to quit.")
     print("Commands: /memory, /agents, /route <task>")
@@ -58,7 +59,9 @@ def main():
 
         # --- normal agent task ---
         result = sup.run(task, memory)
-        print("\nAssistant:\n")
+        solver_name = result.get("solver_agent", "unknown")
+
+        print(f"\nAssistant (solver: {solver_name}):\n")
         print(result["final"])
 
         if args.learn:
