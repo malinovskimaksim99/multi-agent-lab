@@ -37,7 +37,10 @@ def main():
     sup = Supervisor(auto_solver=args.auto)
 
     result = sup.run(args.task, memory)
-    print(result["final"])
+
+print(f"[solver: {result.get('solver_agent')} | tags: {result.get('critique_tags')}]")
+print(result["final"])
+
 
     if args.learn:
         tags = result.get("critique_tags", []) or []
