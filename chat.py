@@ -1,6 +1,8 @@
 import argparse
+import json
 
 from agents.supervisor import Supervisor
+from agents.registry import list_agents
 from memory.store import load_memory, save_memory, set_flag
 
 
@@ -20,14 +22,26 @@ def main():
     sup = Supervisor()
 
     print("Multi-agent chat. Type 'exit' to quit.")
+    print("Commands: /memory, /agents")
 
     while True:
         task = input("\nYou: ").strip()
         if not task:
             continue
+
         if task.lower() in {"exit", "quit"}:
             break
 
+        # service commands
+        if task in {"/memory", ":memory"}:
+            print(json.dumps(load_memory(), ensure_ascii=False, indent=2))
+            continue
+
+        if task in {"/agents", ":agents"}:
+            print("Registered agents:", ", ".join(list_agents()))
+            continue
+
+        # normal task
         result = sup.run(task, memory)
         print("\nAssistant:\n")
         print(result["final"])
