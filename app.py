@@ -1,9 +1,10 @@
+import argparse
 import json
 from datetime import datetime
 from pathlib import Path
 
 from agents.supervisor import Supervisor
-from memory.store import load_memory, save_memory, add_rule
+from memory.store import load_memory, save_memory, set_flag
 
 LOGS = Path("logs.jsonl")
 
@@ -17,17 +18,30 @@ def log_run(result):
         }, ensure_ascii=False) + "\n")
 
 def main():
-    task = "Analyze this short text and provide 3 key insights, then check for logical gaps."
-    memory = load_memory()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="Explain what a multi-agent system is in 5 bullet points."
+    )
+    parser.add_argument(
+        "--learn",
+        action="store_true",
+        help="Enable simple flag learning after critique."
+    )
+    args = parser.parse_args()
 
+    memory = load_memory()
     sup = Supervisor()
-    result = sup.run(task, memory)
+
+    result = sup.run(args.task, memory)
     print(result["final"])
 
-    # simple "learning"
-    if "structure" in result["critique"].lower():
-        add_rule(memory, "Always format the answer with clear headings/bullets.")
-        save_memory(memory)
+    if args.learn:
+        tags = result.get("critique_tags", [])
+        if "structure" in tags:
+            set_flag(memory, "force_structure", True)
+            save_memory(memory)
 
     log_run(result)
 
