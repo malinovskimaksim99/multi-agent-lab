@@ -2,13 +2,7 @@ import json
 from collections import Counter
 
 from agents.supervisor import Supervisor
-from memory.store import load_memory, save_memory, add_rule
-
-# Примітивні тригери -> правила пам’яті
-KEYWORD_TO_RULE = {
-    "structure": "Always format the answer with clear headings or bullet points.",
-    "too short": "When giving guidance, include at least 3 concrete steps or examples."
-}
+from memory.store import load_memory, save_memory, set_flag
 
 def main():
     with open("tests/sample_tasks.json", "r", encoding="utf-8") as f:
@@ -20,24 +14,24 @@ def main():
 
     for task in tasks:
         result = sup.run(task, memory)
-        critique = (result.get("critique") or "").lower()
+        tags = result.get("critique_tags", [])
 
-        # збираємо статистику і додаємо правила
-        for ключ, правило in KEYWORD_TO_RULE.items():
-            if ключ in critique:
-                stats[ключ] += 1
-                add_rule(memory, правило)
+        for t in tags:
+            stats[t] += 1
+
+        # learning rules (very simple)
+        if "structure" in tags:
+            set_flag(memory, "force_structure", True)
 
     save_memory(memory)
 
     print("Test run complete.")
-    print("Critique keyword stats:")
+    print("Critique tag stats:")
     for k, v in stats.items():
         print(f"  {k}: {v}")
 
-    print("\nCurrent memory rules:")
-    for r in memory.get("rules", []):
-        print(f" - {r}")
+    print("\nMemory flags now:")
+    print(memory.get("flags", {}))
 
 if __name__ == "__main__":
     main()
