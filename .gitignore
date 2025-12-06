@@ -1,4 +1,22 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Env files
 .env
+
+# Runtime files for this project
+memory/memory.json
+logs.jsonl
