@@ -1,4 +1,8 @@
 {
   "rules": [],
-  "examples": []
+  "examples": [],
+  "flags": {
+    "force_structure": false,
+    "expand_when_short": false
+  }
 }
