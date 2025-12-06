@@ -31,23 +31,33 @@ def main():
     parser.add_argument("--task", type=str, required=True)
     parser.add_argument("--learn", action="store_true")
     parser.add_argument("--auto", action="store_true")
+    parser.add_argument("--team", action="store_true")
+    parser.add_argument("--team-size", type=int, default=2)
     args = parser.parse_args()
 
     memory = load_memory()
-    sup = Supervisor(auto_solver=args.auto)
+    sup = Supervisor(
+        auto_solver=args.auto and not args.team,
+        auto_team=args.team,
+        team_size=args.team_size,
+    )
 
     result = sup.run(args.task, memory)
 
     solver = result.get("solver_agent")
+    team = result.get("team_agents")
     tags = result.get("critique_tags")
-    if solver or tags:
-        print(f"[solver: {solver} | tags: {tags}]")
+
+    line = f"[solver: {solver} | tags: {tags}]"
+    if team:
+        line = f"[solver: {solver} | team: {team} | tags: {tags}]"
+    print(line)
 
     print(result["final"])
 
     if args.learn:
-        tags = result.get("critique_tags", []) or []
-        learn_from_tags(memory, tags)
+        crit_tags = result.get("critique_tags", []) or []
+        learn_from_tags(memory, crit_tags)
         save_memory(memory)
 
     log_run(result)
