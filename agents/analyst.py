@@ -23,10 +23,10 @@ class Analyst:
             body = (
                 "## Task\n"
                 f"{task}\n\n"
-                "## Plan\n" +
-                "\n".join(f"{i+1}. {p}" for i, p in enumerate(plan)) +
-                "\n\n## Answer\n" +
-                "\n".join(f"- {p}" for p in base_points)
+                "## Plan\n"
+                + "\n".join(f"{i+1}. {p}" for i, p in enumerate(plan))
+                + "\n\n## Answer\n"
+                + "\n".join(f"- {p}" for p in base_points)
             )
         else:
             body = (
@@ -52,15 +52,30 @@ class AnalystAgent(BaseAgent):
         self._analyst = Analyst()
 
     def can_handle(self, task: str, context: Optional[Context] = None) -> float:
-        return 0.9
+        t = task.lower()
+
+        writing_markers = [
+            "write", "rewrite", "story", "outline", "essay",
+            "readme", "documentation", "doc", "guide", "installation"
+        ]
+        if any(m in t for m in writing_markers):
+            return 0.55
+
+        analysis_markers = [
+            "analyze", "analysis", "compare", "pros", "cons",
+            "explain", "evaluate", "reason", "checklist", "plan"
+        ]
+        hits = sum(1 for m in analysis_markers if m in t)
+
+        return min(0.9, 0.6 + hits * 0.07)
 
     def run(self, task: str, memory: Memory, context: Optional[Context] = None) -> AgentResult:
-        plan = []
+        plan: List[str] = []
         if context and isinstance(context.get("plan"), list):
             plan = context["plan"]
+
         draft = self._analyst.draft(task, plan, memory)
         return AgentResult(agent=self.name, output=draft, meta={})
 
-    # щоб Supervisor міг красиво робити revise
     def revise(self, draft: str, critique_text: str) -> str:
         return self._analyst.revise(draft, critique_text)
