@@ -54,6 +54,7 @@ class AnalystAgent(BaseAgent):
     def can_handle(self, task: str, context: Optional[Context] = None) -> float:
         t = task.lower()
 
+        # Let writer win on writing/docs tasks
         writing_markers = [
             "write", "rewrite", "story", "outline", "essay",
             "readme", "documentation", "doc", "guide", "installation"
@@ -66,7 +67,6 @@ class AnalystAgent(BaseAgent):
             "explain", "evaluate", "reason", "checklist", "plan"
         ]
         hits = sum(1 for m in analysis_markers if m in t)
-
         return min(0.9, 0.6 + hits * 0.07)
 
     def run(self, task: str, memory: Memory, context: Optional[Context] = None) -> AgentResult:

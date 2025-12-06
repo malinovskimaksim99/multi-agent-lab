@@ -1,6 +1,5 @@
 from typing import Dict, Any, List, Optional
 
-# важливо: імпорти нижче гарантують реєстрацію агентів
 from . import planner as _planner  # noqa: F401
 from . import analyst as _analyst  # noqa: F401
 from . import critic as _critic    # noqa: F401
@@ -13,16 +12,8 @@ from .router import rank_agents
 
 class Supervisor:
     """
-    Orchestrator.
-
-    Default pipeline:
+    Pipeline:
       planner -> solver(auto or fixed) -> critic -> solver(revise)
-
-    - planner is always used
-    - critic is always used
-    - solver can be:
-        * fixed (analyst by default)
-        * auto-selected from registry using router scores
     """
 
     def __init__(
@@ -44,15 +35,12 @@ class Supervisor:
             return self.solver_name
 
         ranked = rank_agents(task, memory, context)
-
-        # filter out planner/critic and any excluded agents
         for name, score in ranked:
             if name in self.solver_exclude:
                 continue
             if score > 0:
                 return name
 
-        # fallback
         return self.solver_name
 
     def run(self, task: str, memory: Memory) -> Dict[str, Any]:
@@ -61,21 +49,17 @@ class Supervisor:
         planner = create_agent(self.planner_name)
         critic = create_agent(self.critic_name)
 
-        # 1) Plan
         plan_res = planner.run(task, memory, context)
         plan = plan_res.output if isinstance(plan_res.output, list) else []
         context["plan"] = plan
 
-        # 2) Pick solver (auto or fixed)
         solver_name = self._pick_solver(task, memory, context)
         solver = create_agent(solver_name)
 
-        # 3) Draft
         draft_res = solver.run(task, memory, context)
         draft = draft_res.output if isinstance(draft_res.output, str) else str(draft_res.output)
         context["draft"] = draft
 
-        # 4) Critique
         crit_res = critic.run(task, memory, context)
         crit_data = crit_res.output or {}
         notes = crit_data.get("notes", [])
@@ -86,7 +70,6 @@ class Supervisor:
         else:
             critique_text = str(notes) if notes else "- Looks ok."
 
-        # 5) Revise if solver supports it
         revise_fn = getattr(solver, "revise", None)
         final = revise_fn(draft, critique_text) if callable(revise_fn) else (draft + "\n\n" + critique_text)
 
