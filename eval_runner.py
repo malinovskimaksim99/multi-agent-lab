@@ -1,6 +1,6 @@
 import argparse
 import json
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
 import agents  # noqa: F401
@@ -82,7 +82,6 @@ def main():
 
     for m in modes:
         results, tag_counter, tagged_tasks = run_mode(m, tasks, memory)
-
         summary["modes"][m] = {
             "tag_stats": dict(tag_counter),
             "tagged_tasks": tagged_tasks[:20],

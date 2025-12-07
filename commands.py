@@ -155,10 +155,29 @@ def run_progress_report() -> str:
         return f"Не вдалося запустити progress_report.py: {e}"
 
 
+def run_eval_runner() -> str:
+    p = Path("eval_runner.py")
+    if not p.exists():
+        return "eval_runner.py не знайдено в проєкті."
+    try:
+        res = subprocess.run(
+            [sys.executable, str(p)],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        out = (res.stdout or "").strip()
+        err = (res.stderr or "").strip()
+        return out if out else (err if err else "Оцінку виконано без виводу.")
+    except Exception as e:
+        return f"Не вдалося запустити eval_runner.py: {e}"
+
+
 def help_text() -> str:
     return (
         "Доступні живі команди:\n"
         "- зроби звіт / progress report\n"
+        "- запусти оцінку / eval\n"
         "- покажи пам’ять / memory\n"
         "- покажи агентів / список агентів\n"
         "- покажи помилки / errors\n"
@@ -188,6 +207,10 @@ def _report_from_text(text: str) -> str:
     return run_progress_report()
 
 
+def _eval_from_text(text: str) -> str:
+    return run_eval_runner()
+
+
 COMMANDS: List[Dict[str, Any]] = [
     {
         "name": "help",
@@ -198,6 +221,15 @@ COMMANDS: List[Dict[str, Any]] = [
         "name": "report",
         "patterns": ["зроби звіт", "покажи звіт", "progress report", "прогрес"],
         "handler": _report_from_text,
+    },
+    {
+        "name": "eval",
+        "patterns": [
+            "запусти оцінку", "зроби оцінку",
+            "run evaluation", "evaluation",
+            "eval", "оцінка якості"
+        ],
+        "handler": _eval_from_text,
     },
     {
         "name": "memory",
@@ -240,11 +272,11 @@ COMMANDS: List[Dict[str, Any]] = [
 def match_command(text: str) -> Optional[Callable[[], str]]:
     t = text.lower().strip()
 
-    # --- smart fallback for "runs" with Ukrainian declensions ---
+    # smart fallback for "runs" with declensions/typos
     if re.search(r"\bостанн\w*\b", t) and re.search(r"\bзапуск\w*\b", t):
         return lambda x=text: _runs_from_text(x)
 
-    # --- smart fallback for "errors" ---
+    # smart fallback for "errors" with day hint
     if re.search(r"\bпомилк\w*\b", t) and ("сьогодні" in t or "вчора" in t):
         return lambda x=text: _errors_from_text(x)
 
