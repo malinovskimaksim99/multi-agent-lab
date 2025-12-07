@@ -7,6 +7,8 @@ from agents.supervisor import Supervisor
 from agents.registry import list_agents
 from memory.store import load_memory, save_memory, set_flag
 
+from commands import match_command
+
 
 def learn_from_tags(memory, tags):
     if "structure" in tags:
@@ -19,7 +21,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--learn", action="store_true", help="Update memory flags after each task.")
     parser.add_argument("--auto", action="store_true", help="Auto-pick best single solver agent by router.")
-    parser.add_argument("--team", action="store_true", help="Use team mode (top-2 solvers + synthesizer).")
+    parser.add_argument("--team", action="store_true", help="Use team mode (top-N solvers + synthesizer).")
     parser.add_argument("--team-size", type=int, default=2, help="Team size for --team mode.")
     args = parser.parse_args()
 
@@ -31,7 +33,7 @@ def main():
     )
 
     print("Multi-agent chat. Type 'exit' to quit.")
-    print("Commands: /memory, /agents, /route <task>")
+    print("Commands: /memory, /agents, /route <task> + natural commands like 'зроби звіт'")
 
     while True:
         task = input("\nYou: ").strip()
@@ -41,6 +43,7 @@ def main():
         if task.lower() in {"exit", "quit"}:
             break
 
+        # --- slash service commands ---
         if task in {"/memory", ":memory"}:
             print(json.dumps(load_memory(), ensure_ascii=False, indent=2))
             continue
@@ -61,6 +64,15 @@ def main():
                 print(f" - {name}: {score:.2f}")
             continue
 
+        # --- natural language commands ---
+        handler = match_command(task)
+        if handler:
+            out = handler()
+            print("\nAssistant:\n")
+            print(out)
+            continue
+
+        # --- normal agent task ---
         result = sup.run(task, memory)
 
         solver_name = result.get("solver_agent", "unknown")

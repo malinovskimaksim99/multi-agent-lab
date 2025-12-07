@@ -25,6 +25,12 @@ def show_memory() -> str:
     return json.dumps(load_memory(), ensure_ascii=False, indent=2)
 
 
+def show_agents() -> str:
+    from agents.registry import list_agents
+    agents_list = list_agents()
+    return "Registered agents: " + ", ".join(agents_list)
+
+
 def show_recent_runs(limit: int = 10) -> str:
     data = _safe_read_logs(limit=200)
     if not data:
@@ -84,6 +90,7 @@ def help_text() -> str:
         "- покажи пам’ять / memory\n"
         "- покажи помилки / errors\n"
         "- покажи останні запуски / last runs\n"
+        "- покажи агентів / список агентів\n"
         "\nТакож залишаються slash-команди:\n"
         "- /memory, /agents, /route <task>"
     )
@@ -104,6 +111,17 @@ COMMANDS: List[Dict[str, Any]] = [
         "name": "memory",
         "patterns": ["покажи пам", "memory", "пам’ять", "память"],
         "handler": show_memory,
+    },
+    {
+        "name": "agents",
+        "patterns": [
+            "покажи список агентів",
+            "покажи агентів",
+            "список агентів",
+            "agents list",
+            "show agents"
+        ],
+        "handler": show_agents,
     },
     {
         "name": "errors",
