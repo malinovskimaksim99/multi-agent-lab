@@ -1,13 +1,15 @@
 import json
 import sys
 import subprocess
+import re
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List
+from datetime import datetime, timezone, timedelta
 
 LOGS = Path("logs.jsonl")
 
 
-def _safe_read_logs(limit: int = 50) -> List[Dict[str, Any]]:
+def _safe_read_logs(limit: int = 200) -> List[Dict[str, Any]]:
     if not LOGS.exists():
         return []
     lines = LOGS.read_text(encoding="utf-8").splitlines()
@@ -18,6 +20,61 @@ def _safe_read_logs(limit: int = 50) -> List[Dict[str, Any]]:
         except Exception:
             continue
     return out
+
+
+def _parse_ts(obj: Dict[str, Any]) -> Optional[datetime]:
+    ts = obj.get("ts")
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _filter_by_day(data: List[Dict[str, Any]], day_utc: datetime) -> List[Dict[str, Any]]:
+    target_date = day_utc.date()
+    filtered = []
+    for obj in data:
+        dt = _parse_ts(obj)
+        if not dt:
+            continue
+        if dt.date() == target_date:
+            filtered.append(obj)
+    return filtered
+
+
+def _resolve_day_from_text(text: str) -> Optional[datetime]:
+    t = text.lower()
+    now = datetime.now(timezone.utc)
+
+    if "сьогодні" in t:
+        return now
+    if "вчора" in t:
+        return now - timedelta(days=1)
+
+    m = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", t)
+    if m:
+        y, mo, d = map(int, m.groups())
+        try:
+            return datetime(y, mo, d, tzinfo=timezone.utc)
+        except Exception:
+            return None
+
+    return None
+
+
+def _extract_limit(text: str, default: int = 10, max_limit: int = 100) -> int:
+    m = re.search(r"\b(\d{1,3})\b", text)
+    if not m:
+        return default
+    n = int(m.group(1))
+    if n <= 0:
+        return default
+    return min(n, max_limit)
 
 
 def show_memory() -> str:
@@ -31,10 +88,17 @@ def show_agents() -> str:
     return "Registered agents: " + ", ".join(agents_list)
 
 
-def show_recent_runs(limit: int = 10) -> str:
-    data = _safe_read_logs(limit=200)
+def show_recent_runs(limit: int = 10, day_filter: Optional[datetime] = None) -> str:
+    data = _safe_read_logs(limit=500)
     if not data:
         return "Немає логів запусків поки що."
+
+    if day_filter:
+        data = _filter_by_day(data, day_filter)
+
+    if not data:
+        return "Немає запусків для заданого періоду."
+
     tail = data[-limit:]
     lines = []
     for obj in tail:
@@ -49,15 +113,23 @@ def show_recent_runs(limit: int = 10) -> str:
     return "\n".join(lines)
 
 
-def show_errors(limit: int = 20) -> str:
-    data = _safe_read_logs(limit=300)
+def show_errors(limit: int = 20, day_filter: Optional[datetime] = None) -> str:
+    data = _safe_read_logs(limit=800)
+    if not data:
+        return "Немає логів запусків поки що."
+
+    if day_filter:
+        data = _filter_by_day(data, day_filter)
+
     tagged = []
     for obj in data:
         tags = obj.get("critique_tags") or []
         if tags:
             tagged.append(obj)
+
     if not tagged:
         return "За останні запуски не знайдено tagged-проблем."
+
     tail = tagged[-limit:]
     lines = []
     for obj in tail:
@@ -85,32 +157,52 @@ def run_progress_report() -> str:
 
 def help_text() -> str:
     return (
-        "Доступні живі команди (можна писати звичайним текстом):\n"
+        "Доступні живі команди:\n"
         "- зроби звіт / progress report\n"
         "- покажи пам’ять / memory\n"
+        "- покажи агентів / список агентів\n"
         "- покажи помилки / errors\n"
         "- покажи останні запуски / last runs\n"
-        "- покажи агентів / список агентів\n"
-        "\nТакож залишаються slash-команди:\n"
+        "\nПараметризовані приклади:\n"
+        "- покажи останні 20 запусків\n"
+        "- покажи помилки за сьогодні\n"
+        "- покажи останні 5 запусків за вчора\n"
+        "\nSlash-команди:\n"
         "- /memory, /agents, /route <task>"
     )
+
+
+def _runs_from_text(text: str) -> str:
+    limit = _extract_limit(text, default=10)
+    day = _resolve_day_from_text(text)
+    return show_recent_runs(limit=limit, day_filter=day)
+
+
+def _errors_from_text(text: str) -> str:
+    limit = _extract_limit(text, default=20)
+    day = _resolve_day_from_text(text)
+    return show_errors(limit=limit, day_filter=day)
+
+
+def _report_from_text(text: str) -> str:
+    return run_progress_report()
 
 
 COMMANDS: List[Dict[str, Any]] = [
     {
         "name": "help",
         "patterns": ["help", "довідка", "команди", "що вмієш", "що можеш"],
-        "handler": help_text,
+        "handler": lambda text: help_text(),
     },
     {
         "name": "report",
         "patterns": ["зроби звіт", "покажи звіт", "progress report", "прогрес"],
-        "handler": run_progress_report,
+        "handler": _report_from_text,
     },
     {
         "name": "memory",
         "patterns": ["покажи пам", "memory", "пам’ять", "память"],
-        "handler": show_memory,
+        "handler": lambda text: show_memory(),
     },
     {
         "name": "agents",
@@ -121,7 +213,7 @@ COMMANDS: List[Dict[str, Any]] = [
             "agents list",
             "show agents"
         ],
-        "handler": show_agents,
+        "handler": lambda text: show_agents(),
     },
     {
         "name": "errors",
@@ -130,24 +222,36 @@ COMMANDS: List[Dict[str, Any]] = [
             "помилки", "помилкі",
             "errors", "проблеми", "issues"
         ],
-        "handler": show_errors,
+        "handler": _errors_from_text,
     },
     {
         "name": "runs",
         "patterns": [
             "покажи останні запуски", "покажи остані запуски",
             "останні запуски", "остані запуски",
-            "last runs", "історія запусків", "history"
+            "last runs", "історія запусків", "history",
+            "покажи запуск", "покажи запуски"
         ],
-        "handler": show_recent_runs,
+        "handler": _runs_from_text,
     },
 ]
 
 
 def match_command(text: str) -> Optional[Callable[[], str]]:
     t = text.lower().strip()
+
+    # --- smart fallback for "runs" with Ukrainian declensions ---
+    if re.search(r"\bостанн\w*\b", t) and re.search(r"\bзапуск\w*\b", t):
+        return lambda x=text: _runs_from_text(x)
+
+    # --- smart fallback for "errors" ---
+    if re.search(r"\bпомилк\w*\b", t) and ("сьогодні" in t or "вчора" in t):
+        return lambda x=text: _errors_from_text(x)
+
     for cmd in COMMANDS:
         for p in cmd["patterns"]:
             if p in t:
-                return cmd["handler"]
+                handler = cmd["handler"]
+                return lambda h=handler, x=text: h(x)
+
     return None
