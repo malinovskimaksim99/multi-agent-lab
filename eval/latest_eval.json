@@ -2,7 +2,7 @@
   "modes": {
     "auto": {
       "tag_stats": {
-        "meta_template": 9
+        "meta_template": 6
       },
       "tagged_tasks": [
         {
@@ -36,25 +36,7 @@
           ]
         },
         {
-          "task": "Create a short plan to add a new agent safely",
-          "tags": [
-            "meta_template"
-          ]
-        },
-        {
-          "task": "Outline next steps to improve our multi-agent lab",
-          "tags": [
-            "meta_template"
-          ]
-        },
-        {
           "task": "Summarize how our multi-agent pipeline works",
-          "tags": [
-            "meta_template"
-          ]
-        },
-        {
-          "task": "List key design principles for agent routing",
           "tags": [
             "meta_template"
           ]
@@ -111,18 +93,14 @@
           "solver_agent": "analyst",
           "team_agents": null,
           "team_profile": null,
-          "critique_tags": [
-            "meta_template"
-          ]
+          "critique_tags": []
         },
         {
           "task": "Outline next steps to improve our multi-agent lab",
-          "solver_agent": "writer",
+          "solver_agent": "analyst",
           "team_agents": null,
           "team_profile": null,
-          "critique_tags": [
-            "meta_template"
-          ]
+          "critique_tags": []
         },
         {
           "task": "Summarize how our multi-agent pipeline works",
@@ -138,72 +116,13 @@
           "solver_agent": "analyst",
           "team_agents": null,
           "team_profile": null,
-          "critique_tags": [
-            "meta_template"
-          ]
+          "critique_tags": []
         }
       ]
     },
     "team": {
-      "tag_stats": {
-        "meta_template": 9
-      },
-      "tagged_tasks": [
-        {
-          "task": "Write a short README section for installation",
-          "tags": [
-            "meta_template"
-          ]
-        },
-        {
-          "task": "Create a minimal project README outline",
-          "tags": [
-            "meta_template"
-          ]
-        },
-        {
-          "task": "Explain planning vs critique",
-          "tags": [
-            "meta_template"
-          ]
-        },
-        {
-          "task": "Explain the roles of Planner, Analyst, Critic",
-          "tags": [
-            "meta_template"
-          ]
-        },
-        {
-          "task": "Compare single-solver vs team-solver modes",
-          "tags": [
-            "meta_template"
-          ]
-        },
-        {
-          "task": "Create a short plan to add a new agent safely",
-          "tags": [
-            "meta_template"
-          ]
-        },
-        {
-          "task": "Outline next steps to improve our multi-agent lab",
-          "tags": [
-            "meta_template"
-          ]
-        },
-        {
-          "task": "Summarize how our multi-agent pipeline works",
-          "tags": [
-            "meta_template"
-          ]
-        },
-        {
-          "task": "List key design principles for agent routing",
-          "tags": [
-            "meta_template"
-          ]
-        }
-      ],
+      "tag_stats": {},
+      "tagged_tasks": [],
       "results": [
         {
           "task": "Write a short README section for installation",
@@ -213,9 +132,7 @@
             "analyst"
           ],
           "team_profile": "docs",
-          "critique_tags": [
-            "meta_template"
-          ]
+          "critique_tags": []
         },
         {
           "task": "Create a minimal project README outline",
@@ -225,9 +142,7 @@
             "analyst"
           ],
           "team_profile": "docs",
-          "critique_tags": [
-            "meta_template"
-          ]
+          "critique_tags": []
         },
         {
           "task": "Explain planning vs critique",
@@ -237,9 +152,7 @@
             "analyst"
           ],
           "team_profile": "explain",
-          "critique_tags": [
-            "meta_template"
-          ]
+          "critique_tags": []
         },
         {
           "task": "Explain the roles of Planner, Analyst, Critic",
@@ -249,9 +162,7 @@
             "analyst"
           ],
           "team_profile": "explain",
-          "critique_tags": [
-            "meta_template"
-          ]
+          "critique_tags": []
         },
         {
           "task": "Compare single-solver vs team-solver modes",
@@ -261,9 +172,7 @@
             "analyst"
           ],
           "team_profile": "explain",
-          "critique_tags": [
-            "meta_template"
-          ]
+          "critique_tags": []
         },
         {
           "task": "Create a short plan to add a new agent safely",
@@ -273,9 +182,7 @@
             "explainer"
           ],
           "team_profile": "planning",
-          "critique_tags": [
-            "meta_template"
-          ]
+          "critique_tags": []
         },
         {
           "task": "Outline next steps to improve our multi-agent lab",
@@ -285,9 +192,7 @@
             "explainer"
           ],
           "team_profile": "planning",
-          "critique_tags": [
-            "meta_template"
-          ]
+          "critique_tags": []
         },
         {
           "task": "Summarize how our multi-agent pipeline works",
@@ -297,9 +202,7 @@
             "analyst"
           ],
           "team_profile": "explain",
-          "critique_tags": [
-            "meta_template"
-          ]
+          "critique_tags": []
         },
         {
           "task": "List key design principles for agent routing",
@@ -309,9 +212,7 @@
             "explainer"
           ],
           "team_profile": "general",
-          "critique_tags": [
-            "meta_template"
-          ]
+          "critique_tags": []
         }
       ]
     }

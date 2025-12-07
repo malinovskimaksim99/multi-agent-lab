@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any, List
+from typing import Optional, List
 import re
 
 from .base import BaseAgent, AgentResult, Context, Memory
@@ -16,12 +16,9 @@ def _count_bullets(text: str) -> int:
 def _looks_meta_template(text: str) -> bool:
     t = text.lower()
     patterns = [
-        # analyst шаблон
         "identify the core request",
         "provide a concise answer",
         "include a quick self-check",
-
-        # explainer шаблон
         "define each concept",
         "explain the purpose",
         "show a simple contrast",
@@ -30,8 +27,6 @@ def _looks_meta_template(text: str) -> bool:
         "concept b:",
         "key difference:",
         "when to choose each",
-
-        # writer/meta
         "draft starter",
         "suggested outline",
         "approach:",
@@ -53,12 +48,16 @@ def _looks_too_generic(text: str) -> bool:
 
 def _needs_steps(task: str) -> bool:
     t = task.lower()
-    markers = [
-        "plan", "planning", "strategy", "roadmap", "outline", "steps",
-        "installation", "readme",
-        "план", "сплануй", "крок", "дорожня карта", "встанов", "інсталяц"
+
+    # Use word-boundary style checks to avoid matching "planner" -> "plan"
+    patterns = [
+        r"\bplan\b", r"\bplanning\b", r"\bstrategy\b", r"\broadmap\b",
+        r"\boutline\b", r"\bsteps\b",
+        r"\breadme\b", r"\binstallation\b", r"\bdocumentation\b",
+        r"\bплан\b", r"\bкрок(и|ів)?\b", r"\bдорожня карта\b",
+        r"\bвстанов(лення|ити)?\b", r"\bінсталяц\w*\b",
     ]
-    return any(m in t for m in markers)
+    return any(re.search(p, t) for p in patterns)
 
 
 @register_agent
@@ -85,27 +84,22 @@ class CriticAgent(BaseAgent):
                 meta={"ok": False, "reason": "empty_draft"}
             )
 
-        # Structure
         if not _has_heading(draft) and _count_bullets(draft) < 2:
             notes.append("Add clearer structure (headings or bullet points).")
             tags.append("missing_structure")
 
-        # Steps expectation
         if _needs_steps(task) and _count_bullets(draft) < 3:
             notes.append("Add more explicit steps/checklist items for this task.")
             tags.append("missing_steps")
 
-        # Meta-template detection
         if _looks_meta_template(draft):
             notes.append("Response looks like a meta-template; add task-specific content.")
             tags.append("meta_template")
 
-        # Too generic
         if _looks_too_generic(draft):
             notes.append("Answer may be too generic; add 2–3 concrete points.")
             tags.append("too_generic")
 
-        # Length sanity
         if len(draft.strip()) < 120 and "summary" not in draft.lower():
             notes.append("Consider expanding slightly for clarity.")
             tags.append("too_short")

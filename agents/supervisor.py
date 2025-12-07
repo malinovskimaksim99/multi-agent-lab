@@ -17,7 +17,6 @@ TEAM_PROFILES: Dict[str, List[str]] = {
     "docs": ["writer", "analyst"],
     "explain": ["explainer", "analyst"],
     "planning": ["analyst", "explainer"],
-    # placeholder until we add a dedicated coder agent
     "code": ["analyst"],
 }
 
@@ -25,7 +24,6 @@ TEAM_PROFILES: Dict[str, List[str]] = {
 def infer_team_profile(task: str) -> str:
     t = task.lower()
 
-    # docs
     docs_markers = [
         "readme", "documentation", "docs", "guide", "installation",
         "інсталяц", "встанов", "документац", "гайд"
@@ -33,15 +31,14 @@ def infer_team_profile(task: str) -> str:
     if any(m in t for m in docs_markers):
         return "docs"
 
-    # explain
     explain_markers = [
         "explain", "difference", "compare", "why", "how", "vs", "versus",
-        "поясни", "різниц", "порівняй", "чому", "як працює", "що таке"
+        "summary", "summarize", "overview", "roles of",
+        "поясни", "різниц", "порівняй", "чому", "як працює", "підсумуй", "огляд"
     ]
     if any(m in t for m in explain_markers):
         return "explain"
 
-    # planning
     planning_markers = [
         "plan", "planning", "strategy", "roadmap", "outline",
         "план", "сплануй", "стратег", "роадмап", "дорожня карта"
@@ -49,7 +46,6 @@ def infer_team_profile(task: str) -> str:
     if any(m in t for m in planning_markers):
         return "planning"
 
-    # code
     code_markers = [
         "code", "bug", "error", "fix", "refactor",
         "python", "javascript", "typescript", "sql", "api",
@@ -69,7 +65,7 @@ class Supervisor:
       - single-solver:
           planner -> solver(auto or fixed) -> critic -> solver(revise)
       - team-solver:
-          planner -> team solvers -> critic -> synthesizer
+          planner -> team solvers -> synthesizer(prelim) -> critic -> synthesizer(final)
 
     Team profiles:
       When enabled, we seed the team with profile-preferred agents
@@ -171,12 +167,20 @@ class Supervisor:
 
             context["team_outputs"] = team_outputs
 
+            # Raw team draft (for debugging)
             team_draft = "\n\n".join(
                 [f"## {name} draft\n{out}" for name, out in team_outputs.items()]
             ).strip()
-            context["draft"] = team_draft
 
-            # 3) Critique
+            # 3) PRELIM SYNTHESIS (before critique)
+            synthesizer = create_agent(self.synthesizer_name)
+            prelim_res = synthesizer.run(task, memory, context)
+            prelim = prelim_res.output if isinstance(prelim_res.output, str) else team_draft
+
+            # Critic should review the prelim (not raw team drafts)
+            context["draft"] = prelim
+
+            # 4) Critique
             crit_res = critic.run(task, memory, context)
             crit_data = crit_res.output or {}
             notes = crit_data.get("notes", [])
@@ -189,10 +193,9 @@ class Supervisor:
 
             context["critique_text"] = critique_text
 
-            # 4) Synthesize
-            synthesizer = create_agent(self.synthesizer_name)
-            syn_res = synthesizer.run(task, memory, context)
-            final = syn_res.output if isinstance(syn_res.output, str) else team_draft
+            # 5) FINAL SYNTHESIS (with critique_text for quality notes)
+            final_res = synthesizer.run(task, memory, context)
+            final = final_res.output if isinstance(final_res.output, str) else prelim
 
             return {
                 "task": task,
@@ -200,7 +203,8 @@ class Supervisor:
                 "team_agents": team_names,
                 "team_profile": profile,
                 "solver_agent": self.synthesizer_name,
-                "draft": team_draft,
+                "team_draft": team_draft,
+                "draft": prelim,
                 "critique": critique_text,
                 "critique_tags": tags,
                 "final": final,
