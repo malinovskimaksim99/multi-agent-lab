@@ -1,0 +1,170 @@
+{
+  "modes": {
+    "auto": {
+      "tag_stats": {},
+      "tagged_tasks": [],
+      "results": [
+        {
+          "task": "Write a short README section for installation",
+          "solver_agent": "writer",
+          "team_agents": null,
+          "team_profile": null,
+          "critique_tags": []
+        },
+        {
+          "task": "Create a minimal project README outline",
+          "solver_agent": "writer",
+          "team_agents": null,
+          "team_profile": null,
+          "critique_tags": []
+        },
+        {
+          "task": "Explain planning vs critique",
+          "solver_agent": "explainer",
+          "team_agents": null,
+          "team_profile": null,
+          "critique_tags": []
+        },
+        {
+          "task": "Explain the roles of Planner, Analyst, Critic",
+          "solver_agent": "explainer",
+          "team_agents": null,
+          "team_profile": null,
+          "critique_tags": []
+        },
+        {
+          "task": "Compare single-solver vs team-solver modes",
+          "solver_agent": "explainer",
+          "team_agents": null,
+          "team_profile": null,
+          "critique_tags": []
+        },
+        {
+          "task": "Create a short plan to add a new agent safely",
+          "solver_agent": "analyst",
+          "team_agents": null,
+          "team_profile": null,
+          "critique_tags": []
+        },
+        {
+          "task": "Outline next steps to improve our multi-agent lab",
+          "solver_agent": "writer",
+          "team_agents": null,
+          "team_profile": null,
+          "critique_tags": []
+        },
+        {
+          "task": "Summarize how our multi-agent pipeline works",
+          "solver_agent": "explainer",
+          "team_agents": null,
+          "team_profile": null,
+          "critique_tags": []
+        },
+        {
+          "task": "List key design principles for agent routing",
+          "solver_agent": "analyst",
+          "team_agents": null,
+          "team_profile": null,
+          "critique_tags": []
+        }
+      ]
+    },
+    "team": {
+      "tag_stats": {},
+      "tagged_tasks": [],
+      "results": [
+        {
+          "task": "Write a short README section for installation",
+          "solver_agent": "synthesizer",
+          "team_agents": [
+            "writer",
+            "analyst"
+          ],
+          "team_profile": "docs",
+          "critique_tags": []
+        },
+        {
+          "task": "Create a minimal project README outline",
+          "solver_agent": "synthesizer",
+          "team_agents": [
+            "writer",
+            "analyst"
+          ],
+          "team_profile": "docs",
+          "critique_tags": []
+        },
+        {
+          "task": "Explain planning vs critique",
+          "solver_agent": "synthesizer",
+          "team_agents": [
+            "explainer",
+            "analyst"
+          ],
+          "team_profile": "explain",
+          "critique_tags": []
+        },
+        {
+          "task": "Explain the roles of Planner, Analyst, Critic",
+          "solver_agent": "synthesizer",
+          "team_agents": [
+            "explainer",
+            "analyst"
+          ],
+          "team_profile": "explain",
+          "critique_tags": []
+        },
+        {
+          "task": "Compare single-solver vs team-solver modes",
+          "solver_agent": "synthesizer",
+          "team_agents": [
+            "explainer",
+            "analyst"
+          ],
+          "team_profile": "explain",
+          "critique_tags": []
+        },
+        {
+          "task": "Create a short plan to add a new agent safely",
+          "solver_agent": "synthesizer",
+          "team_agents": [
+            "analyst",
+            "explainer"
+          ],
+          "team_profile": "planning",
+          "critique_tags": []
+        },
+        {
+          "task": "Outline next steps to improve our multi-agent lab",
+          "solver_agent": "synthesizer",
+          "team_agents": [
+            "analyst",
+            "explainer"
+          ],
+          "team_profile": "planning",
+          "critique_tags": []
+        },
+        {
+          "task": "Summarize how our multi-agent pipeline works",
+          "solver_agent": "synthesizer",
+          "team_agents": [
+            "explainer",
+            "analyst"
+          ],
+          "team_profile": "explain",
+          "critique_tags": []
+        },
+        {
+          "task": "List key design principles for agent routing",
+          "solver_agent": "synthesizer",
+          "team_agents": [
+            "analyst",
+            "explainer"
+          ],
+          "team_profile": "general",
+          "critique_tags": []
+        }
+      ]
+    }
+  },
+  "tasks_count": 9
+}
