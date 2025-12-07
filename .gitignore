@@ -20,3 +20,7 @@ ENV/
 # Runtime files for this project
 memory/memory.json
 logs.jsonl
+# runtime artifacts
+logs.jsonl
+eval/latest_eval.json
+memory/memory.json
