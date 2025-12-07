@@ -2,42 +2,45 @@
   "modes": {
     "auto": {
       "tag_stats": {
-        "meta_template": 6
+        "missing_steps": 2,
+        "missing_structure": 4,
+        "meta_template": 4,
+        "too_short": 1
       },
       "tagged_tasks": [
         {
           "task": "Write a short README section for installation",
           "tags": [
-            "meta_template"
-          ]
-        },
-        {
-          "task": "Create a minimal project README outline",
-          "tags": [
-            "meta_template"
+            "missing_steps"
           ]
         },
         {
           "task": "Explain planning vs critique",
           "tags": [
-            "meta_template"
+            "missing_structure",
+            "missing_steps",
+            "meta_template",
+            "too_short"
           ]
         },
         {
           "task": "Explain the roles of Planner, Analyst, Critic",
           "tags": [
+            "missing_structure",
             "meta_template"
           ]
         },
         {
           "task": "Compare single-solver vs team-solver modes",
           "tags": [
+            "missing_structure",
             "meta_template"
           ]
         },
         {
           "task": "Summarize how our multi-agent pipeline works",
           "tags": [
+            "missing_structure",
             "meta_template"
           ]
         }
@@ -49,7 +52,7 @@
           "team_agents": null,
           "team_profile": null,
           "critique_tags": [
-            "meta_template"
+            "missing_steps"
           ]
         },
         {
@@ -57,9 +60,7 @@
           "solver_agent": "writer",
           "team_agents": null,
           "team_profile": null,
-          "critique_tags": [
-            "meta_template"
-          ]
+          "critique_tags": []
         },
         {
           "task": "Explain planning vs critique",
@@ -67,7 +68,10 @@
           "team_agents": null,
           "team_profile": null,
           "critique_tags": [
-            "meta_template"
+            "missing_structure",
+            "missing_steps",
+            "meta_template",
+            "too_short"
           ]
         },
         {
@@ -76,6 +80,7 @@
           "team_agents": null,
           "team_profile": null,
           "critique_tags": [
+            "missing_structure",
             "meta_template"
           ]
         },
@@ -85,6 +90,7 @@
           "team_agents": null,
           "team_profile": null,
           "critique_tags": [
+            "missing_structure",
             "meta_template"
           ]
         },
@@ -108,6 +114,7 @@
           "team_agents": null,
           "team_profile": null,
           "critique_tags": [
+            "missing_structure",
             "meta_template"
           ]
         },
