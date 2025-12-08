@@ -7,6 +7,7 @@ from . import critic as _critic    # noqa: F401
 from . import writer as _writer    # noqa: F401
 from . import synthesizer as _synth  # noqa: F401
 from . import explainer as _explainer  # noqa: F401
+from . import coder as _coder      # noqa: F401  # новий імпорт, щоб CoderAgent точно реєструвався
 
 from .registry import create_agent, list_agents
 from .base import Context, Memory
@@ -17,7 +18,8 @@ TEAM_PROFILES: Dict[str, List[str]] = {
     "docs": ["writer", "analyst"],
     "explain": ["explainer", "analyst"],
     "planning": ["analyst", "explainer"],
-    "code": ["analyst"],
+    # для кодових задач у team-mode віддаємо перевагу coder, потім analyst
+    "code": ["coder", "analyst"],
 }
 
 
@@ -26,33 +28,46 @@ def infer_team_profile(task: str) -> str:
 
     docs_markers = [
         "readme", "documentation", "docs", "guide", "installation",
-        "інсталяц", "встанов", "документац", "гайд"
+        "інсталяц", "встанов", "документац", "гайд",
     ]
     if any(m in t for m in docs_markers):
         return "docs"
 
+    # Код / помилки / traceback
+    code_markers = [
+        "traceback",
+        "exception",
+        "error",
+        "bug",
+        "fix",
+        "refactor",
+        "python",
+        "javascript",
+        "typescript",
+        "sql",
+        "api",
+        "код",
+        "скрипт",
+        "помилка",
+        "виправ",
+    ]
+    if any(m in t for m in code_markers):
+        return "code"
+
     explain_markers = [
         "explain", "difference", "compare", "why", "how", "vs", "versus",
         "summary", "summarize", "overview", "roles of",
-        "поясни", "різниц", "порівняй", "чому", "як працює", "підсумуй", "огляд"
+        "поясни", "різниц", "порівняй", "чому", "як працює", "підсумуй", "огляд",
     ]
     if any(m in t for m in explain_markers):
         return "explain"
 
     planning_markers = [
         "plan", "planning", "strategy", "roadmap", "outline",
-        "план", "сплануй", "стратег", "роадмап", "дорожня карта"
+        "план", "сплануй", "стратег", "роадмап", "дорожня карта",
     ]
     if any(m in t for m in planning_markers):
         return "planning"
-
-    code_markers = [
-        "code", "bug", "error", "fix", "refactor",
-        "python", "javascript", "typescript", "sql", "api",
-        "код", "скрипт", "помилка", "виправ"
-    ]
-    if any(m in t for m in code_markers):
-        return "code"
 
     return "general"
 
@@ -92,12 +107,48 @@ class Supervisor:
         self.auto_team = auto_team
         self.team_size = max(1, int(team_size))
         self.use_team_profiles = use_team_profiles
+        # не включаємо сюди coder — він має бути доступний як solver
         self.solver_exclude = set(solver_exclude or ["planner", "critic", "synthesizer"])
 
     def _pick_solver(self, task: str, memory: Memory, context: Context) -> str:
+        """
+        Вибір одного solver-агента для single-mode.
+
+        Логіка:
+          1) Якщо auto_solver=False -> повертаємо фіксований solver_name (звичайно 'analyst').
+          2) Якщо задача схожа на кодову (traceback/error/python/код/помилка) і є coder ->
+             повертаємо 'coder'.
+          3) Інакше використовуємо загальний rank_agents.
+        """
         if not self.auto_solver:
             return self.solver_name
 
+        t = task.lower()
+        available = set(list_agents())
+
+        # Fast-path для кодових задач
+        code_markers = [
+            "traceback",
+            "exception",
+            "error",
+            "bug",
+            "fix",
+            "refactor",
+            "python",
+            "javascript",
+            "typescript",
+            "sql",
+            "api",
+            "код",
+            "скрипт",
+            "помилка",
+            "виправ",
+        ]
+        if any(m in t for m in code_markers):
+            if "coder" in available and "coder" not in self.solver_exclude:
+                return "coder"
+
+        # Загальний ранжувальник
         ranked = rank_agents(task, memory, context)
         for name, score in ranked:
             if name in self.solver_exclude:
@@ -167,17 +218,17 @@ class Supervisor:
 
             context["team_outputs"] = team_outputs
 
-            # Raw team draft (for debugging)
+            # Raw team draft (для налагодження)
             team_draft = "\n\n".join(
                 [f"## {name} draft\n{out}" for name, out in team_outputs.items()]
             ).strip()
 
-            # 3) PRELIM SYNTHESIS (before critique)
+            # 3) PRELIM SYNTHESIS (перед критикою)
             synthesizer = create_agent(self.synthesizer_name)
             prelim_res = synthesizer.run(task, memory, context)
             prelim = prelim_res.output if isinstance(prelim_res.output, str) else team_draft
 
-            # Critic should review the prelim (not raw team drafts)
+            # Critic має переглядати саме prelim
             context["draft"] = prelim
 
             # 4) Critique
@@ -193,7 +244,7 @@ class Supervisor:
 
             context["critique_text"] = critique_text
 
-            # 5) FINAL SYNTHESIS (with critique_text for quality notes)
+            # 5) FINAL SYNTHESIS (з урахуванням critique_text)
             final_res = synthesizer.run(task, memory, context)
             final = final_res.output if isinstance(final_res.output, str) else prelim
 
