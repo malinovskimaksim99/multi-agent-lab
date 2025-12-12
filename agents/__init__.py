@@ -7,3 +7,4 @@ from . import writer    # noqa: F401
 from . import explainer # noqa: F401
 from . import synthesizer  # noqa: F401
 from . import coder     # noqa: F401
+from . import trainer   # noqa: F401

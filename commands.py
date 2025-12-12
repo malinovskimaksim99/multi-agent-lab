@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List
 from datetime import datetime, timezone, timedelta
+from db import get_recent_runs
+
 
 LOGS = Path("logs.jsonl")
 
@@ -137,6 +139,44 @@ def show_errors(limit: int = 20, day_filter: Optional[datetime] = None) -> str:
     return "\n".join(lines)
 
 
+def show_db_runs(limit: int = 10) -> str:
+    """Показати останні запуски з SQLite-БД (runs.db)."""
+    try:
+        runs = get_recent_runs(limit=limit)
+    except Exception as e:
+        return f"Не вдалося прочитати запуски з БД: {e}"
+
+    if not runs:
+        return "У БД ще немає збережених запусків."
+
+    lines = []
+    for r in runs:
+        task = r.get("task", "") or ""
+        if len(task) > 80:
+            task = task[:77] + "..."
+        solver = r.get("solver_agent")
+        team = r.get("team_agents") or []
+        tags = r.get("critique_tags") or []
+        ts = r.get("ts", "") or ""
+        rid = r.get("id")
+
+        if team:
+            lines.append(
+                f"- [id={rid}] {ts} | team: {team} | solver: {solver} | tags: {tags} | task: {task}"
+            )
+        else:
+            lines.append(
+                f"- [id={rid}] {ts} | solver: {solver} | tags: {tags} | task: {task}"
+            )
+
+    return "\n".join(lines)
+
+
+def _db_runs_from_text(text: str) -> str:
+    limit = _extract_limit(text, default=10)
+    return show_db_runs(limit=limit)
+
+
 def run_progress_report() -> str:
     p = Path("progress_report.py")
     if not p.exists():
@@ -182,6 +222,7 @@ def help_text() -> str:
         "- покажи агентів / список агентів\n"
         "- покажи помилки / errors\n"
         "- покажи останні запуски / last runs\n"
+        "- покажи запуски з бд / db runs\n"
         "\nПараметризовані приклади:\n"
         "- покажи останні 20 запусків\n"
         "- покажи помилки за сьогодні\n"
@@ -265,6 +306,17 @@ COMMANDS: List[Dict[str, Any]] = [
             "покажи запуск", "покажи запуски"
         ],
         "handler": _runs_from_text,
+    },
+    {
+        "name": "db_runs",
+        "patterns": [
+            "покажи запуски з бд",
+            "запуски з бд",
+            "бд запуски",
+            "db runs",
+            "runs from db",
+        ],
+        "handler": _db_runs_from_text,
     },
 ]
 

@@ -5,18 +5,30 @@ from pathlib import Path
 
 from agents.supervisor import Supervisor
 from memory.store import load_memory, save_memory, set_flag
+from db import init_db, save_run_to_db
 
 LOGS = Path("logs.jsonl")
 
 
 def log_run(result):
+    """Логує запуск у logs.jsonl та записує його в SQLite-базу."""
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        **result,
+    }
+
+    # Лог у файл
     if not LOGS.exists():
         LOGS.write_text("", encoding="utf-8")
     with LOGS.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({
-            "ts": datetime.now(timezone.utc).isoformat(),
-            **result
-        }, ensure_ascii=False) + "\n")
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    # Запис у БД
+    try:
+        save_run_to_db(entry)
+    except Exception as e:
+        # Не валимо основний сценарій, якщо з БД щось не так
+        print(f"[warn] Не вдалося зберегти запуск у БД: {e}")
 
 
 def learn_from_tags(memory, tags):
@@ -34,6 +46,9 @@ def main():
     parser.add_argument("--team", action="store_true")
     parser.add_argument("--team-size", type=int, default=2)
     args = parser.parse_args()
+
+    # Ініціалізуємо БД (створює таблиці, якщо їх ще немає)
+    init_db()
 
     memory = load_memory()
     sup = Supervisor(
