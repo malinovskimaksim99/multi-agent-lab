@@ -1,5 +1,3 @@
-
-
 from typing import Optional, Any, Dict, List
 from collections import Counter, defaultdict
 import re
@@ -62,6 +60,11 @@ class TrainerAgent(BaseAgent):
         if any(m in t for m in markers):
             return 0.95
 
+        # Загальна евристика: якщо є "аналіз" + згадки про БД або запусків,
+        # вважаємо, що це запит до тренера.
+        if "аналіз" in t and ("бд" in t or "database" in t or "запуск" in t or "запусків" in t or "runs" in t):
+            return 0.9
+
         # якщо є згадки про eval / теги / критику – теж можемо підхопити
         soft_markers = [
             "critique tags",
@@ -107,6 +110,10 @@ class TrainerAgent(BaseAgent):
 
         total = len(runs)
 
+        # Статистика по типах задач (task_type)
+        type_total: Counter = Counter()
+        type_by_solver: Dict[str, Counter] = defaultdict(Counter)
+
         # Статистика по агентах
         solver_total: Counter = Counter()
         solver_with_tags: Counter = Counter()
@@ -118,6 +125,10 @@ class TrainerAgent(BaseAgent):
         for r in runs:
             solver = r.get("solver_agent") or "unknown"
             solver_total[solver] += 1
+
+            task_type = r.get("task_type") or "other"
+            type_total[task_type] += 1
+            type_by_solver[task_type][solver] += 1
 
             tags = r.get("critique_tags") or []
             if tags:
@@ -144,6 +155,26 @@ class TrainerAgent(BaseAgent):
             else:
                 ratio = bad / cnt
             lines.append(f"- **{solver}**: {cnt} запусків, з тегами: {bad} (≈ {ratio:.0%})")
+        lines.append("")
+
+        # Підсумок по типах задач
+        lines.append("### Підсумок по типах задач (task_type)")
+        if not type_total:
+            lines.append("Поки що не виявлено типів задач (task_type) у запусків.")
+        else:
+            for ttype, cnt in type_total.most_common():
+                lines.append(f"- **{ttype}**: {cnt} запусків")
+        lines.append("")
+
+        # Агенти по типах задач
+        lines.append("### Агенти по типах задач")
+        if not type_by_solver:
+            lines.append("Немає достатньо інформації про відповідність агентів до типів задач.")
+        else:
+            for ttype, solver_cnt in type_by_solver.items():
+                parts = [f"{s}: {c}" for s, c in solver_cnt.most_common()]
+                joined = ", ".join(parts)
+                lines.append(f"- **{ttype}**: {joined}")
         lines.append("")
 
         # Проблемні теги

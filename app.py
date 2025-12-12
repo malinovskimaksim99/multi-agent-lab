@@ -7,13 +7,119 @@ from agents.supervisor import Supervisor
 from memory.store import load_memory, save_memory, set_flag
 from db import init_db, save_run_to_db
 
+
 LOGS = Path("logs.jsonl")
+
+def classify_task_type(task: str) -> str:
+    """
+    Дуже проста класифікація типу задачі за ключовими словами.
+    Використовується для збереження у БД (runs.task_type), щоб потім Trainer/Meta
+    могли аналізувати якість по типах задач.
+    """
+    t = (task or "").lower()
+
+    # Документація / README / інсталяція
+    docs_markers = [
+        "readme",
+        "documentation",
+        "docs",
+        "guide",
+        "installation",
+        "інсталяц",
+        "встанов",
+        "документац",
+        "гайд",
+    ]
+    if any(k in t for k in docs_markers):
+        return "docs"
+
+    # Пояснення / порівняння
+    explain_markers = [
+        "explain",
+        "difference",
+        "compare",
+        "vs",
+        "versus",
+        "roles of",
+        "summary",
+        "summarize",
+        "overview",
+        "поясни",
+        "що таке",
+        "різниц",
+        "порівняй",
+        "огляд",
+        "підсумуй",
+    ]
+    if any(k in t for k in explain_markers):
+        return "explain"
+
+    # Код / помилки / traceback
+    code_markers = [
+        "code",
+        "bug",
+        "error",
+        "traceback",
+        "exception",
+        "syntaxerror",
+        "stack trace",
+        "код",
+        "помилка",
+        "скрипт",
+        "стек",
+    ]
+    if any(k in t for k in code_markers):
+        return "code"
+
+    # Аналіз БД / запусків / датасету
+    db_markers = [
+        "бд",
+        "database",
+        "датасет",
+        "dataset",
+        "runs",
+        "запусків",
+        "аналіз запусків",
+    ]
+    if any(k in t for k in db_markers):
+        return "db_analysis"
+
+    # Планування
+    plan_markers = [
+        "plan",
+        "planning",
+        "roadmap",
+        "outline",
+        "план",
+        "кроки",
+        "стратег",
+        "дорожня карта",
+    ]
+    if any(k in t for k in plan_markers):
+        return "plan"
+
+    # Мета-рівень / тренер
+    meta_markers = [
+        "trainer",
+        "meta",
+        "аналіз агентів",
+        "аналіз запусків",
+        "оптимізація агентів",
+    ]
+    if any(k in t for k in meta_markers):
+        return "meta"
+
+    return "other"
 
 
 def log_run(result):
     """Логує запуск у logs.jsonl та записує його в SQLite-базу."""
+    task = result.get("task", "")
+    task_type = classify_task_type(task)
+
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(),
+        "task_type": task_type,
         **result,
     }
 

@@ -27,6 +27,7 @@ def init_db() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts TEXT,
             task TEXT,
+            task_type TEXT,
             solver_agent TEXT,
             team_agents TEXT,
             team_profile TEXT,
@@ -37,6 +38,12 @@ def init_db() -> None:
         )
         """
     )
+
+    # Якщо таблиця вже існувала раніше без task_type – додамо цю колонку
+    cur.execute("PRAGMA table_info(runs)")
+    columns = [row[1] for row in cur.fetchall()]
+    if "task_type" not in columns:
+        cur.execute("ALTER TABLE runs ADD COLUMN task_type TEXT")
 
     # Таблиця прикладів для датасету
     cur.execute(
@@ -90,6 +97,7 @@ def save_run_to_db(result: Dict[str, Any]) -> None:
     # Підстрахуємося: не впасти, якщо чогось немає
     ts = result.get("ts") or ""
     task = result.get("task") or ""
+    task_type = result.get("task_type") or ""
     solver_agent = result.get("solver_agent") or ""
     team_agents = result.get("team_agents") or []
     team_profile = result.get("team_profile") or ""
@@ -110,6 +118,7 @@ def save_run_to_db(result: Dict[str, Any]) -> None:
         INSERT INTO runs (
             ts,
             task,
+            task_type,
             solver_agent,
             team_agents,
             team_profile,
@@ -118,11 +127,12 @@ def save_run_to_db(result: Dict[str, Any]) -> None:
             final,
             raw_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             ts,
             task,
+            task_type,
             solver_agent,
             team_agents_json,
             team_profile,

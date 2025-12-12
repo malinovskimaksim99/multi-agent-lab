@@ -301,6 +301,39 @@ def run_eval_runner() -> str:
         return f"Не вдалося запустити eval_runner.py: {e}"
 
 
+def run_trainer_analysis(limit: int = 50) -> str:
+    """
+    Запустити TrainerAgent через app.py, щоб отримати узагальнений аналіз запусків з БД.
+    Використовується як бекенд для чат-команди 'аналіз агентів' / 'аналіз запусків'.
+    """
+    p = Path("app.py")
+    if not p.exists():
+        return "app.py не знайдено в проєкті."
+
+    task = f"Зроби аналіз {limit} останніх запусків у БД (виклик тренера через команду)."
+    try:
+        res = subprocess.run(
+            [sys.executable, str(p), "--task", task, "--auto"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        out = (res.stdout or "").strip()
+        err = (res.stderr or "").strip()
+        return out if out else (err if err else "Аналіз виконано без виводу.")
+    except Exception as e:
+        return f"Не вдалося запустити аналіз тренера: {e}"
+
+
+def _trainer_from_text(text: str) -> str:
+    """
+    Обробка тексту для команди аналізу запусків/агентів.
+    Число в тексті інтерпретується як 'скільки останніх запусків' аналізувати.
+    """
+    limit = _extract_limit(text, default=50, max_limit=200)
+    return run_trainer_analysis(limit=limit)
+
+
 def help_text() -> str:
     return (
         "Доступні живі команди:\n"
@@ -313,10 +346,12 @@ def help_text() -> str:
         "- покажи запуски з бд / db runs\n"
         "- додай запуск в датасет / add to dataset\n"
         "- покажи датасет / dataset\n"
+        "- аналіз агентів / аналіз запусків\n"
         "\nПараметризовані приклади:\n"
         "- покажи останні 20 запусків\n"
         "- покажи помилки за сьогодні\n"
         "- покажи останні 5 запусків за вчора\n"
+        "- аналіз 50 останніх запусків\n"
         "\nSlash-команди:\n"
         "- /memory, /agents, /route <task>"
     )
@@ -430,6 +465,17 @@ COMMANDS: List[Dict[str, Any]] = [
         ],
         "handler": _dataset_show_from_text,
     },
+    {
+        "name": "trainer_analysis",
+        "patterns": [
+            "аналіз агентів",
+            "аналіз запусків",
+            "trainer stats",
+            "аналіз бд запусків",
+            "аналіз останніх запусків",
+        ],
+        "handler": _trainer_from_text,
+    },
 ]
 
 
@@ -437,7 +483,8 @@ def match_command(text: str) -> Optional[Callable[[], str]]:
     t = text.lower().strip()
 
     # smart fallback for "runs" with declensions/typos
-    if re.search(r"\bостанн\w*\b", t) and re.search(r"\bзапуск\w*\b", t):
+    # вимагає наявності слова "покажи" або "show", щоб не перехоплювати фрази типу "аналіз 30 останніх запусків"
+    if ("покажи" in t or "show" in t) and re.search(r"\bостанн\w*\b", t) and re.search(r"\bзапуск\w*\b", t):
         return lambda x=text: _runs_from_text(x)
 
     # smart fallback for "errors" with day hint
@@ -451,6 +498,10 @@ def match_command(text: str) -> Optional[Callable[[], str]]:
     # smart fallback for showing dataset
     if "датасет" in t and ("покажи" in t or "show" in t):
         return lambda x=text: _dataset_show_from_text(x)
+
+    # smart fallback for trainer analysis (аналіз запусків / агентів)
+    if "аналіз" in t and ("запуск" in t or "запусків" in t or "бд" in t or "агент" in t or "agents" in t):
+        return lambda x=text: _trainer_from_text(x)
 
     for cmd in COMMANDS:
         for p in cmd["patterns"]:
