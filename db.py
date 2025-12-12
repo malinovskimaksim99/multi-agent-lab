@@ -377,4 +377,41 @@ def get_agent_configs(agent_name: str) -> Dict[str, Any]:
             continue
     return configs
 
+def get_solver_stats_by_task_type(task_type: str) -> Dict[str, int]:
+    """
+    Повертає статистику по агентам для вказаного типу задач (task_type).
+
+    Якщо task_type == "other" або порожній, повертаємо агреговану статистику
+    по всіх запусках без фільтра по типам задач.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        if task_type and task_type != "other":
+            cur.execute(
+                """
+                SELECT solver_agent, COUNT(*) AS cnt
+                FROM runs
+                WHERE task_type = ?
+                GROUP BY solver_agent
+                """,
+                (task_type,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT solver_agent, COUNT(*) AS cnt
+                FROM runs
+                GROUP BY solver_agent
+                """
+            )
+        rows = cur.fetchall()
+        stats: Dict[str, int] = {}
+        for solver, cnt in rows:
+            key = solver or "unknown"
+            stats[key] = int(cnt or 0)
+        return stats
+    finally:
+        conn.close()
+
 init_db()
