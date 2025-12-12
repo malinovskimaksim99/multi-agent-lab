@@ -39,29 +39,43 @@ class WriterAgent(BaseAgent):
 
         # 1) Кейс: коротка README-секція для installation
         if self._is_install_task(t):
-            lines = [
-                "## Встановлення",
-                "",
-                "### Попередні вимоги",
-                "- Встановлений Python 3.10+.",
-                "- Встановлений git.",
-                "",
-                "### Кроки",
-                "1. Клонувати репозиторій:",
-                "   git clone <URL_РЕПОЗИТОРІЮ>",
-                "   cd <КАТАЛОГ_ПРОЄКТУ>",
-                "2. Створити віртуальне середовище:",
-                "   python -m venv .venv",
-                "3. Активувати віртуальне середовище:",
-                "   source .venv/bin/activate  (Linux/macOS)",
-                "   .venv\\Scripts\\activate   (Windows)",
-                "4. Встановити залежності:",
-                "   pip install -r requirements.txt",
-                "5. За потреби налаштувати змінні оточення або файл конфігурації.",
-                "6. Перевірити запуск програми:",
-                "   python app.py --help",
-            ]
-            output = "\n".join(lines)
+            output = """## Встановлення
+
+### Попередні вимоги
+- Встановлений Python 3.10+.
+- Встановлений git.
+
+### Кроки
+1. Клонувати репозиторій:
+   ```bash
+   git clone <URL_РЕПОЗИТОРІЮ>
+   cd <КАТАЛОГ_ПРОЄКТУ>
+   ```
+2. Створити віртуальне середовище:
+   ```bash
+   python -m venv .venv
+   ```
+3. Активувати віртуальне середовище:
+   ```bash
+   source .venv/bin/activate  # Linux/macOS
+   .venv\\Scripts\\activate   # Windows
+   ```
+4. Встановити залежності:
+   ```bash
+   pip install -r requirements.txt
+   ```
+5. Перевірити запуск програми:
+   ```bash
+   python app.py --help
+   ```
+
+### Швидкий чекліст
+- [ ] Клонувати репозиторій і перейти в каталог проєкту.
+- [ ] Створити віртуальне середовище.
+- [ ] Активувати віртуальне середовище.
+- [ ] Встановити залежності з requirements.txt.
+- [ ] Запустити `python app.py --help` і переконатися, що помилок немає.
+"""
             return AgentResult(agent=self.name, output=output, meta={"mode": "readme_install"})
 
         # 2) Кейс: мінімальний каркас README
