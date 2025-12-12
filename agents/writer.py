@@ -2,6 +2,7 @@ from typing import Optional
 
 from .base import BaseAgent, AgentResult, Context, Memory
 from .registry import register_agent
+from db import get_agent_config
 
 
 @register_agent
@@ -22,6 +23,17 @@ class WriterAgent(BaseAgent):
             "text", "script", "email", "post", "article",
         ]
         hits = sum(1 for k in keywords if k in t)
+        ua_keywords = [
+            "напиши",
+            "написати",
+            "текст",
+            "історію",
+            "опис",
+            "лист",
+            "повідомлення",
+            "статтю",
+        ]
+        hits += sum(1 for k in ua_keywords if k in t)
         if hits == 0:
             return 0.1
         return min(1.0, 0.5 + hits * 0.15)
@@ -36,6 +48,8 @@ class WriterAgent(BaseAgent):
 
     def run(self, task: str, memory: Memory, context: Optional[Context] = None) -> AgentResult:
         t = task.lower()
+
+        cfg_force_struct = get_agent_config(self.name, "force_structure_default", default=True)
 
         # 1) Кейс: коротка README-секція для installation
         if self._is_install_task(t):
@@ -94,19 +108,26 @@ class WriterAgent(BaseAgent):
             output = "\n".join(lines)
             return AgentResult(agent=self.name, output=output, meta={"mode": "readme_outline"})
 
-        # 3) Інші writing-задачі — простий структурований чернетковий текст
-        lines = [
-            "## Завдання",
-            task,
-            "",
-            "### Огляд",
-            "Це задача на написання тексту, потрібна чітка та читабельна відповідь.",
-            "",
-            "### Ключові пункти",
-            "- Сформулюйте мету в 1–2 реченнях.",
-            "- Дайте коротке пояснення з кількома конкретними деталями.",
-            "- Завершіть коротким висновком або наступним кроком.",
-        ]
-        output = "\n".join(lines)
+        # 3) Інші writing-задачі — текст, який можна зробити більш структурованим через конфіг у БД
+        if cfg_force_struct:
+            lines = [
+                "## Завдання",
+                task,
+                "",
+                "### Огляд",
+                "Це задача на написання тексту, потрібна чітка та читабельна відповідь.",
+                "",
+                "### Ключові пункти",
+                "- Сформулюйте мету в 1–2 реченнях.",
+                "- Дайте коротке пояснення з кількома конкретними деталями.",
+                "- Завершіть коротким висновком або наступним кроком.",
+            ]
+            output = "\n".join(lines)
+        else:
+            output = (
+                f"Задача: {task}\n\n"
+                "Дай короткий, але змістовний текст: 1–2 речення про мету, "
+                "кілька конкретних деталей і короткий висновок."
+            )
 
         return AgentResult(agent=self.name, output=output, meta={"mode": "content"})
