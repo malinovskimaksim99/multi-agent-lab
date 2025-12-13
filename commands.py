@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List
 from datetime import datetime, timezone, timedelta
-from db import get_recent_runs, mark_run_as_example, get_dataset_examples
+from db import get_recent_runs, mark_run_as_example, get_dataset_examples, set_agent_config
 
 
 LOGS = Path("logs.jsonl")
@@ -334,6 +334,91 @@ def _trainer_from_text(text: str) -> str:
     return run_trainer_analysis(limit=limit)
 
 
+# --- NEW: Trainer suggestions extraction and apply ---
+def _extract_trainer_suggestions(text: str) -> Dict[str, Any]:
+    """
+    Виділити JSON-блок з пропозиціями конфігів з відповіді TrainerAgent.
+
+    Шукає фрагмент між ```json ... ``` і пробує розпарсити його як dict.
+    Якщо не знаходить або парсинг не вдається, повертає {}.
+    """
+    m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if not m:
+        return {}
+    raw = m.group(1)
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+def apply_trainer_suggestions(limit: int = 50) -> str:
+    """
+    Запустити TrainerAgent, витягнути з його відповіді config_suggestions
+    та оновити agent_configs у БД через set_agent_config.
+    """
+    p = Path("app.py")
+    if not p.exists():
+        return "app.py не знайдено в проєкті."
+
+    task = f"Зроби аналіз {limit} останніх запусків у БД (оновлення конфігів агентів за тренером)."
+    try:
+        res = subprocess.run(
+            [sys.executable, str(p), "--task", task, "--auto"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as e:
+        return f"Не вдалося запустити аналіз тренера: {e}"
+
+    out = (res.stdout or "").strip()
+    err = (res.stderr or "").strip()
+    text = out if out else err
+    if not text:
+        return "Не вдалося отримати відповідь тренера."
+
+    suggestions = _extract_trainer_suggestions(text)
+    if not suggestions:
+        return "Тренер не повернув пропозицій для agent_configs."
+
+    applied: List[str] = []
+    errors: List[str] = []
+
+    for agent_name, cfg in suggestions.items():
+        if not isinstance(cfg, dict):
+            continue
+        try:
+            # cfg очікується як dict з ключами конфігу, наприклад:
+            # {"preferred_task_types": ["db_analysis"]}
+            for key, value in cfg.items():
+                set_agent_config(agent_name, key, value)
+            applied.append(agent_name)
+        except Exception as e:
+            errors.append(f"{agent_name}: {e}")
+
+    if not applied and not errors:
+        return "Не вдалося застосувати жодну пропозицію тренера."
+
+    lines: List[str] = []
+    if applied:
+        agents_str = ", ".join(sorted(set(applied)))
+        lines.append(f"Застосовано пропозиції тренера для агентів: {agents_str}.")
+    if errors:
+        lines.append("Помилки під час оновлення деяких агентів:\n- " + "\n- ".join(errors))
+
+    return "\n".join(lines)
+
+
+def _trainer_apply_from_text(text: str) -> str:
+    """
+    Команда для застосування пропозицій тренера до agent_configs.
+    Число в тексті інтерпретується як 'скільки останніх запусків' аналізувати.
+    """
+    limit = _extract_limit(text, default=50, max_limit=200)
+    return apply_trainer_suggestions(limit=limit)
+
+
 def help_text() -> str:
     return (
         "Доступні живі команди:\n"
@@ -347,6 +432,7 @@ def help_text() -> str:
         "- додай запуск в датасет / add to dataset\n"
         "- покажи датасет / dataset\n"
         "- аналіз агентів / аналіз запусків\n"
+        "- застосуй пропозиції тренера / trainer apply configs\n"
         "\nПараметризовані приклади:\n"
         "- покажи останні 20 запусків\n"
         "- покажи помилки за сьогодні\n"
@@ -475,6 +561,17 @@ COMMANDS: List[Dict[str, Any]] = [
             "аналіз останніх запусків",
         ],
         "handler": _trainer_from_text,
+    },
+    {
+        "name": "trainer_apply_configs",
+        "patterns": [
+            "застосуй пропозиції тренера",
+            "онови конфіг агента за тренером",
+            "онови конфіги агентів за тренером",
+            "apply trainer suggestions",
+            "trainer apply configs",
+        ],
+        "handler": _trainer_apply_from_text,
     },
 ]
 

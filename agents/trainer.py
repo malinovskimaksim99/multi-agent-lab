@@ -1,9 +1,11 @@
 from typing import Optional, Any, Dict, List
 from collections import Counter, defaultdict
 import re
+import json
 
 from .base import BaseAgent, AgentResult, Context, Memory
 from .registry import register_agent
+from .router import classify_task_type
 from db import get_recent_runs
 
 
@@ -126,7 +128,15 @@ class TrainerAgent(BaseAgent):
             solver = r.get("solver_agent") or "unknown"
             solver_total[solver] += 1
 
-            task_type = r.get("task_type") or "other"
+            # Текст задачі для аналізу/прикладів
+            task_text = (r.get("task") or "").strip()
+
+            # Тип задачі: спочатку пробуємо взяти з БД, а якщо його немає –
+            # визначаємо через classify_task_type за текстом задачі.
+            task_type = r.get("task_type") or classify_task_type(task_text)
+            if not task_type:
+                task_type = "other"
+
             type_total[task_type] += 1
             type_by_solver[task_type][solver] += 1
 
@@ -136,12 +146,12 @@ class TrainerAgent(BaseAgent):
                 tag_total.update(tags)
 
                 # кілька прикладів задач для кожного тегу
-                task_text = r.get("task", "") or ""
-                if len(task_text) > 80:
-                    task_text = task_text[:77] + "..."
+                short_text = task_text
+                if len(short_text) > 80:
+                    short_text = short_text[:77] + "..."
                 for tag in tags:
                     if len(tag_examples[tag]) < 3:
-                        tag_examples[tag].append(task_text)
+                        tag_examples[tag].append(short_text)
 
         lines: List[str] = []
         lines.append(f"## Аналіз останніх {total} запусків з БД\n")
@@ -224,6 +234,52 @@ class TrainerAgent(BaseAgent):
                 "Можна поступово додавати нові типи задач та спостерігати за тегами критика."
             )
 
+        # Чернетка пропозицій для конфігів агентів (agent_configs)
+        suggestions: Dict[str, Dict[str, Any]] = {}
+
+        # 1) На основі типів задач: для кожного task_type — агент, який найчастіше його брав
+        for ttype, solver_cnt in type_by_solver.items():
+            if not solver_cnt:
+                continue
+            top_solver, _ = solver_cnt.most_common(1)[0]
+            agent_cfg = suggestions.setdefault(top_solver, {})
+            preferred = agent_cfg.setdefault("preferred_task_types", [])
+            if ttype not in preferred:
+                preferred.append(ttype)
+
+        # 2) На основі проблемних тегів критика — базові рекомендації
+        if "missing_structure" in tag_total:
+            writer_cfg = suggestions.setdefault("writer", {})
+            writer_cfg["force_structure"] = True
+
+        if "missing_steps" in tag_total:
+            writer_cfg = suggestions.setdefault("writer", {})
+            writer_cfg["emphasize_steps"] = True
+
+        if "too_short" in tag_total:
+            explainer_cfg = suggestions.setdefault("explainer", {})
+            explainer_cfg["min_detail_level"] = "medium"
+
+        if "meta_template" in tag_total:
+            analyst_cfg = suggestions.setdefault("analyst", {})
+            analyst_cfg["avoid_meta_templates"] = True
+
+        # 3) Додаємо блок з JSON-пропозиціями в текст звіту
+        lines.append("### Пропозиції для агентів (чернетка)")
+        if not suggestions:
+            lines.append("Поки що немає явних пропозицій для зміни конфігів агентів.")
+        else:
+            lines.append("Нижче — чернетка можливих змін для `agent_configs` у форматі JSON:")
+            try:
+                suggestions_json = json.dumps(suggestions, ensure_ascii=False, indent=2)
+            except TypeError:
+                suggestions_json = "{}"
+            lines.append("")
+            lines.append("```json")
+            lines.append(suggestions_json)
+            lines.append("```")
+        lines.append("")
+
         output = "\n".join(lines)
 
         meta: Dict[str, Any] = {
@@ -231,6 +287,7 @@ class TrainerAgent(BaseAgent):
             "total_runs": total,
             "top_solvers": solver_total.most_common(5),
             "top_tags": tag_total.most_common(5),
+            "config_suggestions": suggestions,
         }
 
         return AgentResult(
