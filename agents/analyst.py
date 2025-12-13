@@ -1,7 +1,8 @@
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from .base import BaseAgent, AgentResult, Context, Memory
 from .registry import register_agent
+from db import get_agent_config
 
 
 def _is_docs(t: str) -> bool:
@@ -48,9 +49,29 @@ class AnalystAgent(BaseAgent):
     def run(self, task: str, memory: Memory, context: Optional[Context] = None) -> AgentResult:
         t = task.lower().strip()
 
-        # легкий прапорець структури з memory
+        # легкий прапорець структури з memory + конфіг з БД
         flags = memory.get("flags") or {}
-        force_structure = bool(flags.get("force_structure", False))
+        cfg: Dict[str, Any] = {}
+
+        try:
+            fs = get_agent_config(self.name, "force_structure")
+        except Exception:
+            fs = None
+
+        try:
+            mp = get_agent_config(self.name, "max_points")
+        except Exception:
+            mp = None
+
+        if fs is not None:
+            cfg["force_structure"] = fs
+        if mp is not None:
+            cfg["max_points"] = mp
+
+        force_structure = bool(
+            flags.get("force_structure", False) or cfg.get("force_structure", False)
+        )
+        max_points = cfg.get("max_points")
 
         # --- 1) Planning vs critique ---
         if (
@@ -206,6 +227,10 @@ class AnalystAgent(BaseAgent):
                 "За потреби додайте короткий приклад або пораду.",
             ]
 
+        # Якщо в конфізі задано max_points — обрізаємо кількість пунктів
+        if isinstance(max_points, int) and max_points > 0 and len(lines) > max_points:
+            lines = lines[:max_points]
+
         if force_structure:
             out = (
                 "## Завдання\n"
@@ -219,5 +244,8 @@ class AnalystAgent(BaseAgent):
         return AgentResult(
             agent=self.name,
             output=out,
-            meta={"mode": "content_scaffold_uk"},
+            meta={
+                "mode": "content_scaffold_uk",
+                "config": cfg,
+            },
         )
