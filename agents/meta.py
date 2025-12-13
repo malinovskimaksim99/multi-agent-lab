@@ -186,6 +186,87 @@ def _format_roadmap() -> str:
     return "\n".join(lines)
 
 
+def _format_training_recommendations(
+    runs: List[Dict[str, Any]],
+    cfgs: Dict[str, Dict[str, Any]],
+    limit: int = 5,
+) -> str:
+    """
+    Формує список конкретних тренувальних кроків на основі історії запусків
+    та наявних конфігів агентів.
+    """
+    lines: List[str] = ["### Рекомендовані тренувальні кроки"]
+
+    if not runs:
+        lines.append("- Поки що немає історії запусків — спочатку запусти кілька задач.")
+        return "\n".join(lines)
+
+    by_agent: Dict[str, Dict[str, Any]] = {}
+    by_type: Dict[str, int] = {}
+    tagged_total = 0
+
+    for r in runs:
+        agent = (r.get("solver_agent") or "unknown").lower()
+        ttype = (r.get("task_type") or "other").lower()
+        tags = r.get("tags") or []
+
+        s = by_agent.setdefault(agent, {"runs": 0, "tagged": 0})
+        s["runs"] += 1
+        if tags:
+            s["tagged"] += 1
+            tagged_total += 1
+
+        by_type[ttype] = by_type.get(ttype, 0) + 1
+
+    recs: List[str] = []
+
+    # 1) Якщо датасет майже порожній — пропонуємо його наповнювати
+    examples = get_dataset_examples(limit=200)
+    if len(examples) < 10:
+        recs.append(
+            "Додай ще кілька прикладів у датасет (good/bad/edge cases), "
+            "особливо для типових задач: пояснення, плани, аналіз БД."
+        )
+
+    # 2) Якщо немає тегів критика — заохочуємо їх використовувати
+    if tagged_total == 0:
+        recs.append(
+            "Почни активніше позначати відповіді тегами через критика "
+            "(too_short, missing_structure тощо), щоб система бачила, де є проблеми."
+        )
+
+    # 3) Пошук агентів з найменшою кількістю запусків
+    if by_agent:
+        sorted_agents = sorted(by_agent.items(), key=lambda kv: kv[1]["runs"])
+        low_name, low_stats = sorted_agents[0]
+        high_name, high_stats = sorted_agents[-1]
+        if low_stats["runs"] < high_stats["runs"]:
+            recs.append(
+                f"Додай кілька задач спеціально для агента `{low_name}`, "
+                "щоб краще зрозуміти його поведінку."
+            )
+
+    # 4) Перевірка ключових агентів на наявність конфігів
+    important_agents = ("analyst", "coder", "trainer")
+    for important in important_agents:
+        if important not in cfgs:
+            recs.append(
+                f"Додай базовий config для агента `{important}` у agent_configs "
+                "(наприклад, preferred_task_types, force_structure)."
+            )
+            break
+
+    if not recs:
+        recs.append(
+            "Продовжуй запускати різні задачі — поки що система виглядає збалансованою."
+        )
+
+    for r in recs[:limit]:
+        lines.append(f"- {r}")
+
+    return "\n".join(lines)
+
+
 @register_agent
 class MetaAgent(BaseAgent):
     """
@@ -238,6 +319,7 @@ class MetaAgent(BaseAgent):
     def run(self, task: str, memory: Memory, context: Optional[Context] = None) -> AgentResult:
         mode = _classify_meta_mode(task)
         runs = get_recent_runs(limit=100)
+        cfgs = _load_all_agent_configs_from_db()
 
         sections: List[str] = []
         sections.append(f"## Meta-звіт по системі агентів\n\n### Вхідна задача\n{task}\n")
@@ -252,6 +334,10 @@ class MetaAgent(BaseAgent):
         # Конфіги корисні в будь-якому режимі
         sections.append("")
         sections.append(_format_configs_summary())
+
+        # Конкретні тренувальні кроки на основі історії запусків і конфігів
+        sections.append("")
+        sections.append(_format_training_recommendations(runs, cfgs))
 
         if mode == "roadmap":
             sections.append("")
