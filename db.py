@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 
 # Шлях до файлу БД
@@ -77,9 +77,58 @@ def init_db() -> None:
     conn.close()
 
 
+def _auto_label_dataset_example(
+    task_type: str,
+    critique_tags: List[Any],
+    final_text: str,
+) -> Optional[Tuple[str, str]]:
+    """
+    Повертає (label, note) для датасету або None, якщо приклад не варто додавати.
+
+    Логіка (перша повноцінна версія):
+      - якщо є явно негативні теги критика -> 'bad';
+      - якщо відповідь дуже коротка або взагалі порожня -> 'bad';
+      - якщо немає негативних тегів, відповідь достатньо розгорнута
+        і задача відноситься до корисних типів -> 'good';
+      - інакше не додаємо в датасет (None).
+    """
+    negative = {
+        "too_short",
+        "missing_structure",
+        "missing_steps",
+        "incorrect",
+        "off_topic",
+    }
+
+    # Нормалізуємо теги до простого списку рядків
+    tags = [str(t) for t in (critique_tags or [])]
+
+    # 1) Явно погані кейси
+    if any(t in negative for t in tags):
+        return "bad", f"auto: negative critique tags -> {tags}"
+
+    # 2) Дуже коротка / порожня відповідь
+    text = (final_text or "").strip()
+    if not text:
+        return "bad", "auto: empty final answer"
+    word_count = len(text.split())
+    if word_count < 20:
+        return "bad", f"auto: very short answer ({word_count} words)"
+
+    # 3) Потенційно хороші приклади
+    useful_types = {"code", "plan", "docs", "db_analysis", "meta", "explain"}
+    normalized_type = task_type or "other"
+    if normalized_type in useful_types and not tags:
+        return "good", f"auto: clean answer for task_type={normalized_type}"
+
+    # 4) Інакше не додаємо до датасету
+    return None
+
+
 def save_run_to_db(result: Dict[str, Any]) -> None:
     """
-    Зберігає результат запуску Supervisor.run(...) в БД.
+    Зберігає результат запуску Supervisor.run(...) в БД і,
+    за потреби, додає приклад у dataset_examples.
 
     Очікується структура, подібна до тієї, що ми записуємо в logs.jsonl:
     {
@@ -97,7 +146,7 @@ def save_run_to_db(result: Dict[str, Any]) -> None:
     # Підстрахуємося: не впасти, якщо чогось немає
     ts = result.get("ts") or ""
     task = result.get("task") or ""
-    task_type = result.get("task_type") or ""
+    task_type = result.get("task_type") or "other"
     solver_agent = result.get("solver_agent") or ""
     team_agents = result.get("team_agents") or []
     team_profile = result.get("team_profile") or ""
@@ -142,6 +191,21 @@ def save_run_to_db(result: Dict[str, Any]) -> None:
             raw_json,
         ),
     )
+
+    run_id = cur.lastrowid
+
+    # --- Автоматичне додавання в датасет (якщо варто) ---
+    auto = _auto_label_dataset_example(task_type, critique_tags, final)
+    if auto is not None:
+        label, note = auto
+        created_at = datetime.now(timezone.utc).isoformat()
+        cur.execute(
+            """
+            INSERT INTO dataset_examples (run_id, label, note, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (run_id, label, note, created_at),
+        )
 
     conn.commit()
     conn.close()
