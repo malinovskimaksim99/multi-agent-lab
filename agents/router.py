@@ -1,4 +1,7 @@
 from typing import List, Optional, Tuple, Set, Dict
+import sqlite3
+import json
+from pathlib import Path
 
 from .registry import list_agents, create_agent
 from .base import Context, Memory
@@ -110,6 +113,49 @@ def classify_task_type(task: str) -> str:
     return "other"
 
 
+def _load_agent_preferences() -> Dict[str, List[str]]:
+    """
+    Зчитує з БД agent_configs налаштування preferred_task_types
+    у вигляді: {agent_name: [task_type1, task_type2, ...]}.
+    Якщо БД або таблиця відсутні, повертає порожній словник.
+    """
+    db_path = Path("runs.db")
+    if not db_path.exists():
+        return {}
+
+    prefs: Dict[str, List[str]] = {}
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT agent_name, config_key, config_value FROM agent_configs"
+        )
+        rows = cur.fetchall()
+    except Exception:
+        return {}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    for agent_name, key, value in rows:
+        if key != "preferred_task_types":
+            continue
+        parsed = value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except Exception:
+                parsed = value
+        if isinstance(parsed, list):
+            prefs[agent_name] = [str(x) for x in parsed]
+        else:
+            prefs[agent_name] = [str(parsed)]
+
+    return prefs
+
+
 def rank_agents(
     task: str,
     memory: Memory,
@@ -131,6 +177,9 @@ def rank_agents(
     stats = get_solver_stats_by_task_type(task_type)
     max_count = max(stats.values()) if stats else 0
 
+    # Зчитуємо преференції агентів з agent_configs (якщо є)
+    agent_prefs = _load_agent_preferences()
+
     scores: List[Tuple[str, float]] = []
     for name in list_agents():
         if name in ex:
@@ -150,7 +199,13 @@ def rank_agents(
                 frac = cnt / max_count  # від 0 до 1
                 bonus = 0.2 * frac      # максимум +0.2 до скору
 
-        score = base_score + bonus
+        # Додатковий бонус за збіг task_type з preferred_task_types з agent_configs
+        pref_bonus = 0.0
+        prefs = agent_prefs.get(name)
+        if prefs and task_type in prefs:
+            pref_bonus = 0.3  # фіксований бонус, якщо агент "любить" цей тип задач
+
+        score = base_score + bonus + pref_bonus
         scores.append((name, score))
 
     scores.sort(key=lambda x: x[1], reverse=True)
