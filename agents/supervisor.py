@@ -15,10 +15,13 @@ from .router import rank_agents
 
 
 TEAM_PROFILES: Dict[str, List[str]] = {
-    "docs": ["writer", "analyst"],
+    # документація / README — спочатку спеціалізований docs-агент, потім writer і analyst
+    "docs": ["docs", "writer", "analyst"],
+    # пояснення / огляди
     "explain": ["explainer", "analyst"],
+    # планування / roadmap
     "planning": ["analyst", "explainer"],
-    # для кодових задач у team-mode віддаємо перевагу coder, потім analyst
+    # код / помилки
     "code": ["coder", "analyst"],
 }
 

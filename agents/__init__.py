@@ -9,3 +9,4 @@ from . import synthesizer  # noqa: F401
 from . import coder     # noqa: F401
 from . import trainer   # noqa: F401
 from . import meta      # noqa: F401
+from . import docs      # noqa: F401
