@@ -1,7 +1,68 @@
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from .base import BaseAgent, AgentResult, Context, Memory
 from .registry import register_agent
+from db import get_agent_config
+
+
+def _load_agent_config(agent_name: str) -> Dict[str, Any]:
+    """
+    Завантажує конфіг агента з БД через get_agent_config.
+    Повертає словник з ключами типу 'style', 'max_lines' тощо.
+    """
+    cfg: Dict[str, Any] = {}
+    try:
+        style = get_agent_config(agent_name, "style")
+        if style:
+            cfg["style"] = style
+    except Exception:
+        pass
+
+    try:
+        max_lines = get_agent_config(agent_name, "max_lines")
+        if max_lines not in (None, ""):
+            try:
+                cfg["max_lines"] = int(max_lines)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return cfg
+
+
+def _apply_style_to_text(text: str, config: Dict[str, Any]) -> str:
+    """
+    Застосовує стиль форматування до готового тексту документації:
+      - style="compact" прибирає зайві порожні рядки;
+      - max_lines скорочує відповідь до N рядків, якщо потрібно.
+    """
+    if not text:
+        return text
+
+    style = config.get("style")
+    max_lines = config.get("max_lines")
+
+    lines = text.splitlines()
+
+    # Обрізаємо по кількості рядків, якщо задано
+    if isinstance(max_lines, int) and max_lines > 0 and len(lines) > max_lines:
+        lines = lines[:max_lines]
+
+    # Компактний стиль: прибираємо дублікати порожніх рядків
+    if style == "compact":
+        cleaned: List[str] = []
+        prev_blank = False
+        for ln in lines:
+            s = ln.rstrip()
+            is_blank = (s == "")
+            if is_blank and prev_blank:
+                continue
+            cleaned.append(s)
+            prev_blank = is_blank
+        lines = cleaned
+
+    return "\n".join(lines)
 
 
 def _is_docs_task(t: str) -> bool:
@@ -36,22 +97,58 @@ class DocsAgent(BaseAgent):
     """
 
     name = "docs"
-    description = "Допомагає з README, інсталяційними інструкціями та документацією."
+    description = (
+        "Спеціаліст по README, розділах 'Встановлення', 'Використання' "
+        "та іншій технічній документації."
+    )
 
     def can_handle(self, task: str, context: Optional[Context] = None) -> float:
+        """
+        Оцінює, наскільки задача схожа на документацію / README.
+        Використовує:
+          - маркери в тексті (англ + укр),
+          - можливий task_type з контексту.
+        """
         t = task.lower()
-        if _is_docs_task(t):
-            return 0.98
+        ctx: Context = context or {}
+        task_type = ctx.get("task_type")
 
-        # якщо явно є слова про "написати інструкцію / гайд"
-        markers = [
-            "напиши інструкц", "напиши гайд", "зроби readme",
-            "опиши встановлення", "опиши використання",
+        doc_markers_en = [
+            "readme", "documentation", "docs", "guide",
+            "install", "installation", "setup",
+            "usage", "how to run", "quick start",
         ]
-        if any(m in t for m in markers):
-            return 0.9
+        doc_markers_ua = [
+            "документац", "гайд", "інструкц", "опис",
+            "встановлен", "інсталяц", "налаштуван",
+            "запуск", "як запустити", "приклади команд",
+        ]
 
-        return 0.2  # не перехоплює все підряд
+        # Базовий score за ключові слова
+        if any(m in t for m in doc_markers_en) or any(m in t for m in doc_markers_ua):
+            # Для документації docs має бути вище writer'а
+            score = 1.30
+        else:
+            # Якщо явно є слова про "написати інструкцію / гайд"
+            markers = [
+                "напиши інструкц", "напиши гайд", "зроби readme",
+                "опиши встановлення", "опиши використання",
+            ]
+            if any(m in t for m in markers):
+                score = 1.10
+            else:
+                # Майже не чіпаємо не-документаційні задачі
+                score = 0.20
+
+        # Підлаштування під task_type з Supervisor/Router
+        if task_type == "docs":
+            # Якщо вже класифіковано як docs — робимо його ще сильнішим.
+            score = max(score, 1.50)
+        elif task_type == "explain":
+            # Якщо це пояснення, але все ж про документацію — не конкуруємо агресивно з explainer.
+            score = max(score, 0.60)
+
+        return score
 
     def _readme_outline(self, task: str) -> str:
         lines: List[str] = [
@@ -88,7 +185,7 @@ class DocsAgent(BaseAgent):
             "3. Активувати віртуальне середовище:",
             "   ```bash",
             "   source .venv/bin/activate  # Linux/macOS",
-            "   .venv\\Scripts\\activate   # Windows",
+            "   .venв\\Scripts\\activate   # Windows",
             "   ```",
             "4. Встановити залежності:",
             "   ```bash",
@@ -120,19 +217,33 @@ class DocsAgent(BaseAgent):
         return "\n".join(lines)
 
     def run(self, task: str, memory: Memory, context: Optional[Context] = None) -> AgentResult:
-        t = task.lower()
+        t = task.lower().strip()
+
+        flags = memory.get("flags", {}) or {}
+        force_structure = bool(flags.get("force_structure"))
+        # expand_when_short можна використати пізніше для додаткових секцій
+        expand_when_short = bool(flags.get("expand_when_short"))
+
+        # Завантажуємо конфіг для docs-агента з БД
+        config = _load_agent_config(self.name)
 
         if _is_readme_outline(t):
-            out = self._readme_outline(task)
+            output = self._readme_outline(task)
+            mode = "docs_readme_outline"
         elif _is_install_section(t):
-            out = self._install_section(task)
+            output = self._install_section(task)
+            mode = "docs_install"
         elif _is_docs_task(t):
-            out = self._generic_docs_help(task)
+            output = self._generic_docs_help(task)
+            mode = "docs_generic"
         else:
-            out = self._generic_docs_help(task)
+            # Фолбек: теж generic, щоб не повертати порожню відповідь
+            output = self._generic_docs_help(task)
+            mode = "docs_generic"
 
+        styled_output = _apply_style_to_text(output, config)
         return AgentResult(
             agent=self.name,
-            output=out,
-            meta={"mode": "docs"},
+            output=styled_output,
+            meta={"mode": mode},
         )
