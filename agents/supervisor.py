@@ -25,6 +25,26 @@ TEAM_PROFILES: Dict[str, List[str]] = {
     "code": ["coder", "analyst"],
 }
 
+# Task types where we definitely want automatic Critic passes.
+# For other task types we can optionally skip Critic to save tokens.
+CRITIC_TASK_TYPES = {
+    "plan",
+    "explain",
+    "docs",
+    "code",
+    "db_analysis",
+    "meta",
+}
+
+# Try to reuse task_type inference from router if available,
+# otherwise fall back to a simple default.
+try:
+    from . import router as _router  # type: ignore
+    infer_task_type_from_router = getattr(_router, "infer_task_type", lambda task: "other")
+except Exception:
+    def infer_task_type_from_router(task: str) -> str:
+        return "other"
+
 
 def infer_team_profile(task: str) -> str:
     t = task.lower()
@@ -198,7 +218,17 @@ class Supervisor:
         return team[: self.team_size], profile
 
     def run(self, task: str, memory: Memory) -> Dict[str, Any]:
+        # Визначаємо тип задачі один раз для всього пайплайну
+        try:
+            task_type = infer_task_type_from_router(task)
+        except Exception:
+            task_type = "other"
+
         context: Context = {}
+        context["task_type"] = task_type
+
+        # чи потрібно запускати Critic для цієї задачі
+        need_critic = task_type in CRITIC_TASK_TYPES
 
         planner = create_agent(self.planner_name)
         critic = create_agent(self.critic_name)
@@ -234,16 +264,20 @@ class Supervisor:
             # Critic має переглядати саме prelim
             context["draft"] = prelim
 
-            # 4) Critique
-            crit_res = critic.run(task, memory, context)
-            crit_data = crit_res.output or {}
-            notes = crit_data.get("notes", [])
-            tags = crit_data.get("tags", [])
+            # 4) Critique (авто-запуск для важливих task_type)
+            tags: List[str] = []
+            if need_critic:
+                crit_res = critic.run(task, memory, context)
+                crit_data = crit_res.output or {}
+                notes = crit_data.get("notes", [])
+                tags = crit_data.get("tags", [])
 
-            if isinstance(notes, list):
-                critique_text = "\n".join(f"- {n}" for n in notes)
+                if isinstance(notes, list):
+                    critique_text = "\n".join(f"- {n}" for n in notes)
+                else:
+                    critique_text = str(notes) if notes else "- Looks ok."
             else:
-                critique_text = str(notes) if notes else "- Looks ok."
+                critique_text = f"- Auto-skip Critic for non-critical task_type='{task_type}'."
 
             context["critique_text"] = critique_text
 
@@ -253,6 +287,7 @@ class Supervisor:
 
             return {
                 "task": task,
+                "task_type": task_type,
                 "plan": plan,
                 "team_agents": team_names,
                 "team_profile": profile,
@@ -274,16 +309,20 @@ class Supervisor:
         draft = draft_res.output if isinstance(draft_res.output, str) else str(draft_res.output)
         context["draft"] = draft
 
-        # 4) Critique
-        crit_res = critic.run(task, memory, context)
-        crit_data = crit_res.output or {}
-        notes = crit_data.get("notes", [])
-        tags = crit_data.get("tags", [])
+        # 4) Critique (авто-запуск для важливих task_type)
+        tags: List[str] = []
+        if need_critic:
+            crit_res = critic.run(task, memory, context)
+            crit_data = crit_res.output or {}
+            notes = crit_data.get("notes", [])
+            tags = crit_data.get("tags", [])
 
-        if isinstance(notes, list):
-            critique_text = "\n".join(f"- {n}" for n in notes)
+            if isinstance(notes, list):
+                critique_text = "\n".join(f"- {n}" for n in notes)
+            else:
+                critique_text = str(notes) if notes else "- Looks ok."
         else:
-            critique_text = str(notes) if notes else "- Looks ok."
+            critique_text = f"- Auto-skip Critic for non-critical task_type='{task_type}'."
 
         # 5) Revise if supported
         revise_fn = getattr(solver, "revise", None)
@@ -291,6 +330,7 @@ class Supervisor:
 
         return {
             "task": task,
+            "task_type": task_type,
             "plan": plan,
             "solver_agent": solver_name,
             "draft": draft,
