@@ -1,6 +1,7 @@
 import json
 import sys
 import subprocess
+import sqlite3
 import re
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List
@@ -170,6 +171,105 @@ def show_db_runs(limit: int = 10) -> str:
             )
 
     return "\n".join(lines)
+
+
+# --- Projects helpers (SQLite, projects table) ---
+
+def _get_db_connection():
+    """Отримати з'єднання з локальною БД runs.db."""
+    return sqlite3.connect("runs.db")
+
+def show_projects() -> str:
+    """
+    Показати список проєктів з таблиці projects.
+    Формат: id, name, type, status, created_at.
+    """
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, name, type, status, created_at, updated_at
+            FROM projects
+            ORDER BY id ASC
+            """
+        )
+        rows = cur.fetchall()
+    except Exception as e:
+        return f"Не вдалося прочитати список проєктів з БД: {e}"
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    if not rows:
+        return "У БД поки немає жодного проєкту."
+
+    lines: List[str] = ["Список проєктів:"]
+    for rid, name, ptype, status, created_at, updated_at in rows:
+        lines.append(
+            f"- id={rid} | name={name} | type={ptype} | status={status} | created_at={created_at}"
+        )
+    return "\n".join(lines)
+
+def show_current_project() -> str:
+    """
+    Показати поточний/останній активний проєкт.
+
+    Наразі ми вважаємо поточним той проєкт, у якого найбільший updated_at.
+    Якщо updated_at однаковий або порожній, беремо з мінімальним id.
+    """
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, name, type, status, created_at, updated_at
+            FROM projects
+            ORDER BY updated_at DESC, id ASC
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+    except Exception as e:
+        return f"Не вдалося визначити поточний проєкт з БД: {e}"
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    if not row:
+        return "Поточний проєкт не знайдено (таблиця projects порожня)."
+
+    rid, name, ptype, status, created_at, updated_at = row
+    return (
+        "Поточний проєкт:\n"
+        f"- id={rid}\n"
+        f"- name={name}\n"
+        f"- type={ptype}\n"
+        f"- status={status}\n"
+        f"- created_at={created_at}\n"
+        f"- updated_at={updated_at}"
+    )
+
+def _projects_from_text(text: str) -> str:
+    """
+    Обробка тексту для команд типу:
+      - 'проєкти'
+      - 'список проєктів'
+      - 'projects list'
+    """
+    return show_projects()
+
+def _current_project_from_text(text: str) -> str:
+    """
+    Обробка тексту для команд типу:
+      - 'поточний проєкт'
+      - 'current project'
+    """
+    return show_current_project()
 
 
 def _db_runs_from_text(text: str) -> str:
@@ -465,6 +565,8 @@ def help_text() -> str:
         "- додай запуск в датасет / add to dataset\n"
         "- покажи датасет / dataset\n"
         "- аналіз агентів / аналіз запусків\n"
+        "- список проєктів / projects list\n"
+        "- поточний проєкт / current project\n"
         "- meta тренування / meta training\n"
         "- застосуй пропозиції тренера / trainer apply configs\n"
         "\nПараметризовані приклади:\n"
@@ -586,6 +688,29 @@ COMMANDS: List[Dict[str, Any]] = [
         "handler": _dataset_show_from_text,
     },
     {
+        "name": "projects",
+        "patterns": [
+            "список проєктів",
+            "список проектів",
+            "проєкти",
+            "проекти",
+            "projects list",
+            "show projects",
+        ],
+        "handler": _projects_from_text,
+    },
+    {
+        "name": "current_project",
+        "patterns": [
+            "поточний проєкт",
+            "поточний проект",
+            "current project",
+            "який зараз проєкт",
+            "який зараз проект",
+        ],
+        "handler": _current_project_from_text,
+    },
+    {
         "name": "meta_train",
         "patterns": [
             "meta тренування",
@@ -623,6 +748,10 @@ COMMANDS: List[Dict[str, Any]] = [
 
 def match_command(text: str) -> Optional[Callable[[], str]]:
     t = text.lower().strip()
+
+    # smart fallback for current project when користувач пише просто "проєкт"/"проект"/"project"
+    if t in ("проєкт", "проект", "project"):
+        return lambda x=text: _current_project_from_text(x)
 
     # smart fallback for "runs" with declensions/typos
     # вимагає наявності слова "покажи" або "show", щоб не перехоплювати фрази типу "аналіз 30 останніх запусків"

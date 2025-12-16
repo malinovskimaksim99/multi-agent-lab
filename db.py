@@ -552,46 +552,76 @@ def get_agent_configs(agent_name: str, project: str = "default") -> Dict[str, An
 
 def ensure_default_project() -> str:
     """
-    Гарантує наявність проєкту 'default' і встановлює його як поточний, якщо ще не встановлено.
+    Гарантує, що в таблиці projects є хоча б один активний проєкт
+    і що app_state.current_project вказує на існуючий проєкт.
+
     Повертає назву поточного проєкту.
     """
     conn = get_connection()
     cur = conn.cursor()
-
-    # Створюємо 'default', якщо його ще немає
-    cur.execute(
-        "SELECT id FROM projects WHERE name = ?",
-        ("default",),
-    )
-    row = cur.fetchone()
     now = datetime.now(timezone.utc).isoformat()
 
-    if not row:
+    # 1) Пробуємо прочитати поточний проєкт
+    cur.execute(
+        "SELECT value FROM app_state WHERE key = 'current_project'"
+    )
+    row = cur.fetchone()
+    if row and row["value"]:
+        current = str(row["value"])
+        # Перевіряємо, чи такий проєкт існує
+        cur.execute(
+            "SELECT id FROM projects WHERE name = ?",
+            (current,),
+        )
+        prow = cur.fetchone()
+        if prow:
+            conn.close()
+            return current
+        # Якщо current_project вказує в нікуди – нижче виберемо коректний проєкт
+
+    # 2) Якщо current_project немає або він битий – шукаємо перший активний проєкт
+    cur.execute(
+        """
+        SELECT name
+        FROM projects
+        WHERE status = 'active'
+        ORDER BY id ASC
+        LIMIT 1
+        """
+    )
+    row = cur.fetchone()
+    if row and row["name"]:
+        name = str(row["name"])
+    else:
+        # 3) Якщо взагалі немає жодного проєкту – створюємо базовий "Розробка"
+        name = "Розробка"
         cur.execute(
             """
             INSERT INTO projects (name, type, description, status, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            ("default", "generic", "Default project", "active", now, now),
+            (
+                name,
+                "dev",
+                "Головний проєкт розробки та навчання multi-agent-lab",
+                "active",
+                now,
+                now,
+            ),
         )
 
-    # Виставляємо current_project, якщо він ще не заданий
+    # 4) Оновлюємо current_project у app_state
     cur.execute(
-        "SELECT value FROM app_state WHERE key = 'current_project'"
+        """
+        INSERT OR REPLACE INTO app_state (key, value, updated_at)
+        VALUES (?, ?, ?)
+        """,
+        ("current_project", name, now),
     )
-    row = cur.fetchone()
-    if not row:
-        cur.execute(
-            """
-            INSERT OR REPLACE INTO app_state (key, value, updated_at)
-            VALUES (?, ?, ?)
-            """,
-            ("current_project", "default", now),
-        )
 
     conn.commit()
     conn.close()
-    return "default"
+    return name
 
 
 def create_project(
@@ -660,7 +690,7 @@ def get_projects() -> List[Dict[str, Any]]:
 
 def get_current_project() -> str:
     """
-    Повертає назву поточного проєкту. Якщо нічого не налаштовано – гарантує 'default'.
+    Повертає назву поточного проєкту. Якщо нічого не налаштовано – гарантує, що обрано існуючий проєкт (через ensure_default_project).
     """
     conn = get_connection()
     cur = conn.cursor()
