@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List
 from datetime import datetime, timezone, timedelta
-from db import get_recent_runs, mark_run_as_example, get_dataset_examples, set_agent_config
+from db import get_recent_runs, mark_run_as_example, get_dataset_examples, set_agent_config, get_recent_errors
 
 
 LOGS = Path("logs.jsonl")
@@ -173,6 +173,42 @@ def show_db_runs(limit: int = 10) -> str:
     return "\n".join(lines)
 
 
+# --- NEW: DB errors listing ---
+def show_db_errors(limit: int = 10) -> str:
+    """
+    Показати останні помилки з таблиці run_errors у SQLite-БД (runs.db).
+    Використовується для аналізу помилок, зафіксованих під час запусків агентів.
+    """
+    try:
+        errors = get_recent_errors(limit=limit)
+    except Exception as e:
+        return f"Не вдалося прочитати помилки з БД: {e}"
+
+    if not errors:
+        return "У БД ще немає збережених помилок."
+
+    lines: List[str] = []
+    for err in errors:
+        error_id = err.get("id") or err.get("error_id")
+        run_id = err.get("run_id")
+        ts = err.get("ts") or err.get("created_at") or ""
+        error_type = err.get("error_type") or err.get("type") or ""
+        message = err.get("error_message") or err.get("message") or ""
+        traceback_short = err.get("traceback_short") or ""
+
+        if message and len(message) > 120:
+            message = message[:117] + "..."
+        if traceback_short and len(traceback_short) > 120:
+            traceback_short = traceback_short[:117] + "..."
+
+        line = f"- [error_id={error_id}] {ts} | run_id={run_id} | type={error_type} | message: {message}"
+        if traceback_short:
+            line += f" | traceback: {traceback_short}"
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
 # --- Projects helpers (SQLite, projects table) ---
 
 def _get_db_connection():
@@ -275,6 +311,20 @@ def _current_project_from_text(text: str) -> str:
 def _db_runs_from_text(text: str) -> str:
     limit = _extract_limit(text, default=10)
     return show_db_runs(limit=limit)
+
+
+# --- NEW: DB errors from text ---
+def _db_errors_from_text(text: str) -> str:
+    """
+    Обробка тексту для команд аналізу помилок з БД:
+      - 'аналіз помилок'
+      - 'помилки з бд'
+      - 'покажи останню помилку'
+      - 'db errors'
+    Число в тексті (якщо є) інтерпретується як limit.
+    """
+    limit = _extract_limit(text, default=10, max_limit=50)
+    return show_db_errors(limit=limit)
 
 
 def _dataset_add_from_text(text: str) -> str:
@@ -560,6 +610,7 @@ def help_text() -> str:
         "- покажи пам’ять / memory\n"
         "- покажи агентів / список агентів\n"
         "- покажи помилки / errors\n"
+        "- аналіз помилок / db errors\n"
         "- покажи останні запуски / last runs\n"
         "- покажи запуски з бд / db runs\n"
         "- додай запуск в датасет / add to dataset\n"
@@ -634,6 +685,20 @@ COMMANDS: List[Dict[str, Any]] = [
             "show agents"
         ],
         "handler": lambda text: show_agents(),
+    },
+    {
+        "name": "db_errors",
+        "patterns": [
+            "аналіз помилок",
+            "аналіз помилки",
+            "помилки з бд",
+            "помилки з бази",
+            "errors from db",
+            "db errors",
+            "останню помилку з бд",
+            "останню помилку",
+        ],
+        "handler": _db_errors_from_text,
     },
     {
         "name": "errors",

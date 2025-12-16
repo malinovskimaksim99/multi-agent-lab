@@ -1,4 +1,5 @@
 from typing import Dict, Any, List, Optional, Tuple
+import traceback
 
 # Ensure agents are registered
 from . import planner as _planner  # noqa: F401
@@ -9,6 +10,7 @@ from . import synthesizer as _synth  # noqa: F401
 from . import explainer as _explainer  # noqa: F401
 from . import coder as _coder      # noqa: F401  # новий імпорт, щоб CoderAgent точно реєструвався
 
+from db import log_run_error
 from .registry import create_agent, list_agents
 from .base import Context, Memory
 from .router import rank_agents
@@ -230,39 +232,85 @@ class Supervisor:
         # чи потрібно запускати Critic для цієї задачі
         need_critic = task_type in CRITIC_TASK_TYPES
 
-        planner = create_agent(self.planner_name)
-        critic = create_agent(self.critic_name)
+        try:
+            planner = create_agent(self.planner_name)
+            critic = create_agent(self.critic_name)
 
-        # 1) Plan
-        plan_res = planner.run(task, memory, context)
-        plan = plan_res.output if isinstance(plan_res.output, list) else []
-        context["plan"] = plan
+            # 1) Plan
+            plan_res = planner.run(task, memory, context)
+            plan = plan_res.output if isinstance(plan_res.output, list) else []
+            context["plan"] = plan
 
-        # 2) TEAM MODE
-        if self.auto_team:
-            team_names, profile = self._pick_team(task, memory, context)
-            team_outputs: Dict[str, str] = {}
+            # 2) TEAM MODE
+            if self.auto_team:
+                team_names, profile = self._pick_team(task, memory, context)
+                team_outputs: Dict[str, str] = {}
 
-            for name in team_names:
-                agent = create_agent(name)
-                res = agent.run(task, memory, context)
-                out = res.output if isinstance(res.output, str) else str(res.output)
-                team_outputs[name] = out
+                for name in team_names:
+                    agent = create_agent(name)
+                    res = agent.run(task, memory, context)
+                    out = res.output if isinstance(res.output, str) else str(res.output)
+                    team_outputs[name] = out
 
-            context["team_outputs"] = team_outputs
+                context["team_outputs"] = team_outputs
 
-            # Raw team draft (для налагодження)
-            team_draft = "\n\n".join(
-                [f"## {name} draft\n{out}" for name, out in team_outputs.items()]
-            ).strip()
+                # Raw team draft (для налагодження)
+                team_draft = "\n\n".join(
+                    [f"## {name} draft\n{out}" for name, out in team_outputs.items()]
+                ).strip()
 
-            # 3) PRELIM SYNTHESIS (перед критикою)
-            synthesizer = create_agent(self.synthesizer_name)
-            prelim_res = synthesizer.run(task, memory, context)
-            prelim = prelim_res.output if isinstance(prelim_res.output, str) else team_draft
+                # 3) PRELIM SYNTHESIS (перед критикою)
+                synthesizer = create_agent(self.synthesizer_name)
+                prelim_res = synthesizer.run(task, memory, context)
+                prelim = prelim_res.output if isinstance(prelim_res.output, str) else team_draft
 
-            # Critic має переглядати саме prelim
-            context["draft"] = prelim
+                # Critic має переглядати саме prelim
+                context["draft"] = prelim
+
+                # 4) Critique (авто-запуск для важливих task_type)
+                tags: List[str] = []
+                if need_critic:
+                    crit_res = critic.run(task, memory, context)
+                    crit_data = crit_res.output or {}
+                    notes = crit_data.get("notes", [])
+                    tags = crit_data.get("tags", [])
+
+                    if isinstance(notes, list):
+                        critique_text = "\n".join(f"- {n}" for n in notes)
+                    else:
+                        critique_text = str(notes) if notes else "- Looks ok."
+                else:
+                    critique_text = f"- Auto-skip Critic for non-critical task_type='{task_type}'."
+
+                context["critique_text"] = critique_text
+
+                # 5) FINAL SYNTHESIS (з урахуванням critique_text)
+                final_res = synthesizer.run(task, memory, context)
+                final = final_res.output if isinstance(final_res.output, str) else prelim
+
+                return {
+                    "task": task,
+                    "task_type": task_type,
+                    "plan": plan,
+                    "team_agents": team_names,
+                    "team_profile": profile,
+                    "solver_agent": self.synthesizer_name,
+                    "team_draft": team_draft,
+                    "draft": prelim,
+                    "critique": critique_text,
+                    "critique_tags": tags,
+                    "final": final,
+                    "available_agents": list_agents(),
+                }
+
+            # 2) SINGLE SOLVER MODE
+            solver_name = self._pick_solver(task, memory, context)
+            solver = create_agent(solver_name)
+
+            # 3) Draft
+            draft_res = solver.run(task, memory, context)
+            draft = draft_res.output if isinstance(draft_res.output, str) else str(draft_res.output)
+            context["draft"] = draft
 
             # 4) Critique (авто-запуск для важливих task_type)
             tags: List[str] = []
@@ -279,63 +327,47 @@ class Supervisor:
             else:
                 critique_text = f"- Auto-skip Critic for non-critical task_type='{task_type}'."
 
-            context["critique_text"] = critique_text
-
-            # 5) FINAL SYNTHESIS (з урахуванням critique_text)
-            final_res = synthesizer.run(task, memory, context)
-            final = final_res.output if isinstance(final_res.output, str) else prelim
+            # 5) Revise if supported
+            revise_fn = getattr(solver, "revise", None)
+            final = revise_fn(draft, critique_text) if callable(revise_fn) else (draft + "\n\n" + critique_text)
 
             return {
                 "task": task,
                 "task_type": task_type,
                 "plan": plan,
-                "team_agents": team_names,
-                "team_profile": profile,
-                "solver_agent": self.synthesizer_name,
-                "team_draft": team_draft,
-                "draft": prelim,
+                "solver_agent": solver_name,
+                "draft": draft,
                 "critique": critique_text,
                 "critique_tags": tags,
                 "final": final,
                 "available_agents": list_agents(),
             }
 
-        # 2) SINGLE SOLVER MODE
-        solver_name = self._pick_solver(task, memory, context)
-        solver = create_agent(solver_name)
+        except Exception as e:
+            # Логуємо помилку в БД і повертаємо зрозуміле повідомлення користувачу
+            tb = traceback.format_exc()
+            try:
+                log_run_error(
+                    run_id=None,
+                    error_type=type(e).__name__,
+                    message=str(e),
+                    traceback_text=tb,
+                    project=None,
+                )
+            except Exception:
+                # Не даємо падати вдруге, якщо навіть логування не спрацювало
+                pass
 
-        # 3) Draft
-        draft_res = solver.run(task, memory, context)
-        draft = draft_res.output if isinstance(draft_res.output, str) else str(draft_res.output)
-        context["draft"] = draft
+            error_message = f"Виникла внутрішня помилка під час виконання задачі: {type(e).__name__}: {e}"
 
-        # 4) Critique (авто-запуск для важливих task_type)
-        tags: List[str] = []
-        if need_critic:
-            crit_res = critic.run(task, memory, context)
-            crit_data = crit_res.output or {}
-            notes = crit_data.get("notes", [])
-            tags = crit_data.get("tags", [])
-
-            if isinstance(notes, list):
-                critique_text = "\n".join(f"- {n}" for n in notes)
-            else:
-                critique_text = str(notes) if notes else "- Looks ok."
-        else:
-            critique_text = f"- Auto-skip Critic for non-critical task_type='{task_type}'."
-
-        # 5) Revise if supported
-        revise_fn = getattr(solver, "revise", None)
-        final = revise_fn(draft, critique_text) if callable(revise_fn) else (draft + "\n\n" + critique_text)
-
-        return {
-            "task": task,
-            "task_type": task_type,
-            "plan": plan,
-            "solver_agent": solver_name,
-            "draft": draft,
-            "critique": critique_text,
-            "critique_tags": tags,
-            "final": final,
-            "available_agents": list_agents(),
-        }
+            return {
+                "task": task,
+                "task_type": task_type,
+                "plan": [],
+                "solver_agent": "supervisor",
+                "draft": "",
+                "critique": "",
+                "critique_tags": [],
+                "final": error_message,
+                "available_agents": list_agents(),
+            }

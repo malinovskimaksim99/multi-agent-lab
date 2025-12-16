@@ -48,6 +48,21 @@ def init_db() -> None:
     if "project" not in columns:
         cur.execute("ALTER TABLE runs ADD COLUMN project TEXT DEFAULT 'default'")
 
+    # Таблиця для логування помилок запусків
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS run_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER,
+            ts TEXT,
+            project TEXT,
+            error_type TEXT,
+            message TEXT,
+            traceback TEXT
+        )
+        """
+    )
+
     # Таблиця прикладів для датасету
     cur.execute(
         """
@@ -546,6 +561,101 @@ def get_agent_configs(agent_name: str, project: str = "default") -> Dict[str, An
         except Exception:
             continue
     return configs
+
+
+
+# ----------------- Error logging helpers -----------------
+
+
+def log_run_error(
+    run_id: Optional[int],
+    error_type: str,
+    message: str,
+    traceback_text: str,
+    project: Optional[str] = None,
+) -> None:
+    """
+    Логує помилку, пов'язану із запуском агента / Supervisor-а.
+
+    run_id може бути None, якщо помилка сталася ще до того, як ми зберегли сам запуск.
+    Якщо project не вказано, а run_id є, спробуємо підтягнути project з runs.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    if project is None and run_id is not None:
+        cur.execute("SELECT project FROM runs WHERE id = ?", (run_id,))
+        row = cur.fetchone()
+        if row and row["project"]:
+            project = row["project"]
+
+    if project is None:
+        project = "default"
+
+    ts = datetime.now(timezone.utc).isoformat()
+
+    cur.execute(
+        """
+        INSERT INTO run_errors (run_id, ts, project, error_type, message, traceback)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (run_id, ts, project, error_type, message, traceback_text),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def get_recent_errors(
+    limit: int = 20,
+    project: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Повертає останні N помилок з таблиці run_errors.
+    За потреби можна фільтрувати по конкретному проєкту.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    if project is not None:
+        cur.execute(
+            """
+            SELECT id, run_id, ts, project, error_type, message, traceback
+            FROM run_errors
+            WHERE project = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (project, limit),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id, run_id, ts, project, error_type, message, traceback
+            FROM run_errors
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+
+    rows = cur.fetchall()
+    conn.close()
+
+    errors: List[Dict[str, Any]] = []
+    for r in rows:
+        errors.append(
+            {
+                "id": r["id"],
+                "run_id": r["run_id"],
+                "ts": r["ts"],
+                "project": r["project"],
+                "error_type": r["error_type"],
+                "message": r["message"],
+                "traceback": r["traceback"],
+            }
+        )
+    return errors
 
 
 # ----------------- Project helpers -----------------
