@@ -30,6 +30,13 @@ def _looks_meta_template(text: str) -> bool:
         "draft starter",
         "suggested outline",
         "approach:",
+        "сформулюй задачу своїми словами",
+        "сформулюйте задачу своїми словами",
+        "дайте 3–5 конкретних пунктів",
+        "дайте 3-5 конкретних пунктів",
+        "додайте короткий приклад",
+        "додайте короткий крок перевірки результату",
+        "ключові пункти",
     ]
     return any(p in t for p in patterns)
 
@@ -107,8 +114,30 @@ class CriticAgent(BaseAgent):
         if not notes:
             notes.append("Looks ok. Minor polish only.")
 
+        # Simple positive signals for later analysis
+        if _has_heading(draft) and "has_headings" not in tags:
+            tags.append("has_headings")
+        if _count_bullets(draft) >= 3 and "has_bullets" not in tags:
+            tags.append("has_bullets")
+
+        problem_tags = {
+            "missing_structure",
+            "missing_steps",
+            "meta_template",
+            "too_generic",
+            "too_short",
+            "missing_draft",
+        }
+        has_problem = any(t in problem_tags for t in tags)
+        if not has_problem and "ok" not in tags:
+            tags.append("ok")
+
         return AgentResult(
             agent=self.name,
             output={"notes": notes, "tags": tags},
-            meta={"ok": True, "tags_count": len(tags)}
+            meta={
+                "ok": not has_problem,
+                "tags_count": len(tags),
+                "problem_tags": [t for t in tags if t in problem_tags],
+            },
         )

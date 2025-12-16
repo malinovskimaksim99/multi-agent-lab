@@ -334,6 +334,39 @@ def _trainer_from_text(text: str) -> str:
     return run_trainer_analysis(limit=limit)
 
 
+# --- NEW: Meta-train full cycle ---
+def run_meta_train(limit: int = 50) -> str:
+    """
+    Запустити повний meta-тренувальний цикл:
+      1) аналіз запусків тренером (run_trainer_analysis),
+      2) застосування пропозицій тренера до agent_configs (apply_trainer_suggestions).
+
+    Повертає короткий текстовий звіт по обом крокам.
+    """
+    analysis = run_trainer_analysis(limit=limit)
+    apply_result = apply_trainer_suggestions(limit=limit)
+
+    parts: List[str] = []
+    parts.append("=== Аналіз тренера ===")
+    parts.append(analysis)
+    parts.append("")
+    parts.append("=== Оновлення конфігів ===")
+    parts.append(apply_result)
+
+    return "\n".join(parts)
+
+
+def _meta_train_from_text(text: str) -> str:
+    """
+    Команда для запуску meta-тренування:
+    - аналіз останніх N запусків;
+    - оновлення конфігів агентів за пропозиціями тренера.
+    Число в тексті інтерпретується як 'скільки останніх запусків' аналізувати.
+    """
+    limit = _extract_limit(text, default=50, max_limit=200)
+    return run_meta_train(limit=limit)
+
+
 # --- NEW: Trainer suggestions extraction and apply ---
 def _extract_trainer_suggestions(text: str) -> Dict[str, Any]:
     """
@@ -432,6 +465,7 @@ def help_text() -> str:
         "- додай запуск в датасет / add to dataset\n"
         "- покажи датасет / dataset\n"
         "- аналіз агентів / аналіз запусків\n"
+        "- meta тренування / meta training\n"
         "- застосуй пропозиції тренера / trainer apply configs\n"
         "\nПараметризовані приклади:\n"
         "- покажи останні 20 запусків\n"
@@ -550,6 +584,17 @@ COMMANDS: List[Dict[str, Any]] = [
             "приклади датасету",
         ],
         "handler": _dataset_show_from_text,
+    },
+    {
+        "name": "meta_train",
+        "patterns": [
+            "meta тренування",
+            "мета тренування",
+            "meta training",
+            "meta train",
+            "запусти meta тренування",
+        ],
+        "handler": _meta_train_from_text,
     },
     {
         "name": "trainer_analysis",
