@@ -113,6 +113,19 @@ def classify_task_type(task: str) -> str:
     return "other"
 
 
+def infer_task_type(task: str) -> str:
+    """
+    Public API для визначення типу задачі.
+
+    Зараз просто делегує до classify_task_type, але винесено
+    в окрему функцію, щоб:
+      - Supervisor та інші модулі імпортували саме її;
+      - у майбутньому можна було зробити більш розумний аналіз,
+        не ламаючи старі імпорти.
+    """
+    return classify_task_type(task)
+
+
 def _load_agent_preferences() -> Dict[str, List[str]]:
     """
     Зчитує з БД agent_configs налаштування preferred_task_types
