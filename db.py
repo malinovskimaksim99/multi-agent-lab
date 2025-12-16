@@ -26,6 +26,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts TEXT,
+            project TEXT,
             task TEXT,
             task_type TEXT,
             solver_agent TEXT,
@@ -39,11 +40,13 @@ def init_db() -> None:
         """
     )
 
-    # Якщо таблиця вже існувала раніше без task_type – додамо цю колонку
+    # Якщо таблиця вже існувала раніше без task_type / project – додамо ці колонки
     cur.execute("PRAGMA table_info(runs)")
     columns = [row[1] for row in cur.fetchall()]
     if "task_type" not in columns:
         cur.execute("ALTER TABLE runs ADD COLUMN task_type TEXT")
+    if "project" not in columns:
+        cur.execute("ALTER TABLE runs ADD COLUMN project TEXT DEFAULT 'default'")
 
     # Таблиця прикладів для датасету
     cur.execute(
@@ -51,6 +54,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS dataset_examples (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id INTEGER NOT NULL,
+            project TEXT,
             label TEXT,
             note TEXT,
             created_at TEXT,
@@ -59,16 +63,69 @@ def init_db() -> None:
         """
     )
 
+    # Міграція для dataset_examples.project
+    cur.execute("PRAGMA table_info(dataset_examples)")
+    ds_columns = [row[1] for row in cur.fetchall()]
+    if "project" not in ds_columns:
+        cur.execute("ALTER TABLE dataset_examples ADD COLUMN project TEXT DEFAULT 'default'")
+
     # Таблиця м'яких налаштувань агентів
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS agent_configs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             agent_name TEXT NOT NULL,
+            project TEXT,
             config_key TEXT NOT NULL,
             config_value TEXT NOT NULL,
             updated_at TEXT,
-            UNIQUE(agent_name, config_key)
+            UNIQUE(agent_name, config_key, project)
+        )
+        """
+    )
+
+    # Міграція для agent_configs.project
+    cur.execute("PRAGMA table_info(agent_configs)")
+    cfg_columns = [row[1] for row in cur.fetchall()]
+    if "project" not in cfg_columns:
+        cur.execute("ALTER TABLE agent_configs ADD COLUMN project TEXT DEFAULT 'default'")
+
+    # Таблиця проєктів
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            type TEXT,
+            description TEXT,
+            status TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
+    # Таблиця налаштувань проєктів (key/value, як для конфігів агентів)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS project_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            updated_at TEXT,
+            UNIQUE(project_id, key)
+        )
+        """
+    )
+
+    # Таблиця загального стану застосунку (поточний проєкт тощо)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT
         )
         """
     )
@@ -145,6 +202,7 @@ def save_run_to_db(result: Dict[str, Any]) -> None:
     """
     # Підстрахуємося: не впасти, якщо чогось немає
     ts = result.get("ts") or ""
+    project = result.get("project") or "default"
     task = result.get("task") or ""
     task_type = result.get("task_type") or "other"
     solver_agent = result.get("solver_agent") or ""
@@ -166,6 +224,7 @@ def save_run_to_db(result: Dict[str, Any]) -> None:
         """
         INSERT INTO runs (
             ts,
+            project,
             task,
             task_type,
             solver_agent,
@@ -176,10 +235,11 @@ def save_run_to_db(result: Dict[str, Any]) -> None:
             final,
             raw_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             ts,
+            project,
             task,
             task_type,
             solver_agent,
@@ -201,40 +261,64 @@ def save_run_to_db(result: Dict[str, Any]) -> None:
         created_at = datetime.now(timezone.utc).isoformat()
         cur.execute(
             """
-            INSERT INTO dataset_examples (run_id, label, note, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO dataset_examples (run_id, project, label, note, created_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (run_id, label, note, created_at),
+            (run_id, project, label, note, created_at),
         )
 
     conn.commit()
     conn.close()
 
 
-def get_recent_runs(limit: int = 20) -> List[Dict[str, Any]]:
-    """Повертає останні N запусків у зручному вигляді."""
+def get_recent_runs(limit: int = 20, project: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Повертає останні N запусків у зручному вигляді (за потреби — по конкретному проєкту)."""
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute(
-        """
-        SELECT
-            id,
-            ts,
-            task,
-            task_type,
-            solver_agent,
-            team_agents,
-            team_profile,
-            critique,
-            critique_tags,
-            final
-        FROM runs
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (limit,),
-    )
+    if project is not None:
+        cur.execute(
+            """
+            SELECT
+                id,
+                ts,
+                project,
+                task,
+                task_type,
+                solver_agent,
+                team_agents,
+                team_profile,
+                critique,
+                critique_tags,
+                final
+            FROM runs
+            WHERE project = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (project, limit),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT
+                id,
+                ts,
+                project,
+                task,
+                task_type,
+                solver_agent,
+                team_agents,
+                team_profile,
+                critique,
+                critique_tags,
+                final
+            FROM runs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
 
     rows = cur.fetchall()
     conn.close()
@@ -245,6 +329,7 @@ def get_recent_runs(limit: int = 20) -> List[Dict[str, Any]]:
             {
                 "id": r["id"],
                 "ts": r["ts"],
+                "project": r["project"],
                 "task": r["task"],
                 "task_type": r["task_type"],
                 "solver_agent": r["solver_agent"],
@@ -258,7 +343,12 @@ def get_recent_runs(limit: int = 20) -> List[Dict[str, Any]]:
     return results
 
 
-def mark_run_as_example(run_id: int, label: str = "good", note: Optional[str] = None) -> None:
+def mark_run_as_example(
+    run_id: int,
+    label: str = "good",
+    note: Optional[str] = None,
+    project: Optional[str] = None,
+) -> None:
     """
     Позначає запуск як приклад для датасету.
 
@@ -268,75 +358,81 @@ def mark_run_as_example(run_id: int, label: str = "good", note: Optional[str] = 
     conn = get_connection()
     cur = conn.cursor()
 
+    if project is None:
+        # спробуємо підтягнути project з таблиці runs
+        cur.execute(
+            "SELECT project FROM runs WHERE id = ?",
+            (run_id,),
+        )
+        row = cur.fetchone()
+        project = row["project"] if row and row["project"] is not None else "default"
+
     created_at = datetime.now(timezone.utc).isoformat()
 
     cur.execute(
         """
         INSERT OR REPLACE INTO dataset_examples (
             run_id,
+            project,
             label,
             note,
             created_at
         )
-        VALUES (?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (run_id, label, note or "", created_at),
+        (run_id, project, label, note or "", created_at),
     )
 
     conn.commit()
     conn.close()
 
 
-def get_dataset_examples(label: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+def get_dataset_examples(
+    label: Optional[str] = None,
+    limit: int = 50,
+    project: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
     Повертає позначені приклади з таблиці dataset_examples.
 
     Якщо label вказано – фільтрує за конкретним тегом (наприклад, 'good' чи 'bad').
+    Якщо project вказано – фільтрує за конкретним проєктом.
     """
     conn = get_connection()
     cur = conn.cursor()
 
+    base_select = """
+        SELECT
+            e.id AS example_id,
+            e.run_id,
+            e.project,
+            e.label,
+            e.note,
+            e.created_at,
+            r.task,
+            r.solver_agent,
+            r.critique_tags,
+            r.final
+        FROM dataset_examples e
+        JOIN runs r ON r.id = e.run_id
+    """
+    params: List[Any] = []
+    where_clauses: List[str] = []
+
     if label:
-        cur.execute(
-            """
-            SELECT
-                e.id AS example_id,
-                e.run_id,
-                e.label,
-                e.note,
-                e.created_at,
-                r.task,
-                r.solver_agent,
-                r.critique_tags,
-                r.final
-            FROM dataset_examples e
-            JOIN runs r ON r.id = e.run_id
-            WHERE e.label = ?
-            ORDER BY e.id DESC
-            LIMIT ?
-            """,
-            (label, limit),
-        )
-    else:
-        cur.execute(
-            """
-            SELECT
-                e.id AS example_id,
-                e.run_id,
-                e.label,
-                e.note,
-                e.created_at,
-                r.task,
-                r.solver_agent,
-                r.critique_tags,
-                r.final
-            FROM dataset_examples e
-            JOIN runs r ON r.id = e.run_id
-            ORDER BY e.id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        )
+        where_clauses.append("e.label = ?")
+        params.append(label)
+    if project is not None:
+        where_clauses.append("e.project = ?")
+        params.append(project)
+
+    if where_clauses:
+        base_select += " WHERE " + " AND ".join(where_clauses)
+
+    base_select += " ORDER BY e.id DESC LIMIT ?"
+    params.append(limit)
+
+    cur.execute(base_select, tuple(params))
 
     rows = cur.fetchall()
     conn.close()
@@ -347,6 +443,7 @@ def get_dataset_examples(label: Optional[str] = None, limit: int = 50) -> List[D
             {
                 "example_id": r["example_id"],
                 "run_id": r["run_id"],
+                "project": r["project"],
                 "label": r["label"],
                 "note": r["note"],
                 "created_at": r["created_at"],
@@ -359,11 +456,12 @@ def get_dataset_examples(label: Optional[str] = None, limit: int = 50) -> List[D
     return results
 
 
-def set_agent_config(agent_name: str, key: str, value: Any) -> None:
+def set_agent_config(agent_name: str, key: str, value: Any, project: str = "default") -> None:
     """
     Зберігає м'які налаштування агента у таблиці agent_configs.
 
     value серіалізується як JSON-рядок.
+    project - назва проєкту для ізоляції конфігурацій.
     """
     conn = get_connection()
     cur = conn.cursor()
@@ -375,20 +473,26 @@ def set_agent_config(agent_name: str, key: str, value: Any) -> None:
         """
         INSERT OR REPLACE INTO agent_configs (
             agent_name,
+            project,
             config_key,
             config_value,
             updated_at
         )
-        VALUES (?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (agent_name, key, value_json, updated_at),
+        (agent_name, project, key, value_json, updated_at),
     )
 
     conn.commit()
     conn.close()
 
 
-def get_agent_config(agent_name: str, key: str, default: Any = None) -> Any:
+def get_agent_config(
+    agent_name: str,
+    key: str,
+    default: Any = None,
+    project: str = "default",
+) -> Any:
     """
     Повертає значення конкретного налаштування агента або default, якщо його немає.
     """
@@ -399,9 +503,9 @@ def get_agent_config(agent_name: str, key: str, default: Any = None) -> Any:
         """
         SELECT config_value
         FROM agent_configs
-        WHERE agent_name = ? AND config_key = ?
+        WHERE agent_name = ? AND config_key = ? AND project = ?
         """,
-        (agent_name, key),
+        (agent_name, key, project),
     )
     row = cur.fetchone()
     conn.close()
@@ -415,7 +519,7 @@ def get_agent_config(agent_name: str, key: str, default: Any = None) -> Any:
         return default
 
 
-def get_agent_configs(agent_name: str) -> Dict[str, Any]:
+def get_agent_configs(agent_name: str, project: str = "default") -> Dict[str, Any]:
     """
     Повертає всі налаштування агента як dict: {key: value}.
     """
@@ -426,9 +530,9 @@ def get_agent_configs(agent_name: str) -> Dict[str, Any]:
         """
         SELECT config_key, config_value
         FROM agent_configs
-        WHERE agent_name = ?
+        WHERE agent_name = ? AND project = ?
         """,
-        (agent_name,),
+        (agent_name, project),
     )
 
     rows = cur.fetchall()
@@ -442,6 +546,168 @@ def get_agent_configs(agent_name: str) -> Dict[str, Any]:
         except Exception:
             continue
     return configs
+
+
+# ----------------- Project helpers -----------------
+
+def ensure_default_project() -> str:
+    """
+    Гарантує наявність проєкту 'default' і встановлює його як поточний, якщо ще не встановлено.
+    Повертає назву поточного проєкту.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Створюємо 'default', якщо його ще немає
+    cur.execute(
+        "SELECT id FROM projects WHERE name = ?",
+        ("default",),
+    )
+    row = cur.fetchone()
+    now = datetime.now(timezone.utc).isoformat()
+
+    if not row:
+        cur.execute(
+            """
+            INSERT INTO projects (name, type, description, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("default", "generic", "Default project", "active", now, now),
+        )
+
+    # Виставляємо current_project, якщо він ще не заданий
+    cur.execute(
+        "SELECT value FROM app_state WHERE key = 'current_project'"
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO app_state (key, value, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            ("current_project", "default", now),
+        )
+
+    conn.commit()
+    conn.close()
+    return "default"
+
+
+def create_project(
+    name: str,
+    type_: str = "generic",
+    description: str = "",
+    status: str = "active",
+) -> None:
+    """
+    Створює новий проєкт, якщо з таким ім'ям ще немає.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+
+    cur.execute(
+        "SELECT id FROM projects WHERE name = ?",
+        (name,),
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.execute(
+            """
+            INSERT INTO projects (name, type, description, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (name, type_, description, status, now, now),
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def get_projects() -> List[Dict[str, Any]]:
+    """
+    Повертає список усіх проєктів.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT id, name, type, description, status, created_at, updated_at
+        FROM projects
+        ORDER BY id ASC
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    projects: List[Dict[str, Any]] = []
+    for r in rows:
+        projects.append(
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "type": r["type"],
+                "description": r["description"],
+                "status": r["status"],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            }
+        )
+    return projects
+
+
+def get_current_project() -> str:
+    """
+    Повертає назву поточного проєкту. Якщо нічого не налаштовано – гарантує 'default'.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT value FROM app_state WHERE key = 'current_project'"
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    if row and row["value"]:
+        return str(row["value"])
+    # Якщо щось пішло не так – підстрахуємось
+    return ensure_default_project()
+
+
+def set_current_project(name: str) -> None:
+    """
+    Встановлює поточний проєкт (створює його, якщо ще не існує).
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Переконаємось, що проєкт існує
+    cur.execute("SELECT id FROM projects WHERE name = ?", (name,))
+    row = cur.fetchone()
+    if not row:
+        cur.execute(
+            """
+            INSERT INTO projects (name, type, description, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (name, "generic", "", "active", now, now),
+        )
+
+    # Оновлюємо current_project
+    cur.execute(
+        """
+        INSERT OR REPLACE INTO app_state (key, value, updated_at)
+        VALUES (?, ?, ?)
+        """,
+        ("current_project", name, now),
+    )
+
+    conn.commit()
+    conn.close()
 
 def get_solver_stats_by_task_type(task_type: str) -> Dict[str, int]:
     """
@@ -479,5 +745,5 @@ def get_solver_stats_by_task_type(task_type: str) -> Dict[str, int]:
         return stats
     finally:
         conn.close()
-
 init_db()
+ensure_default_project()

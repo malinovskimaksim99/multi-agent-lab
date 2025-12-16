@@ -151,6 +151,7 @@ def main():
     parser.add_argument("--auto", action="store_true")
     parser.add_argument("--team", action="store_true")
     parser.add_argument("--team-size", type=int, default=2)
+    parser.add_argument("--project", type=str, default="default")
     args = parser.parse_args()
 
     # Ініціалізуємо БД (створює таблиці, якщо їх ще немає)
@@ -164,6 +165,8 @@ def main():
     )
 
     result = sup.run(args.task, memory)
+    # Додаємо інформацію про проєкт у result, щоб БД її бачила
+    result.setdefault("project", args.project)
 
     solver = result.get("solver_agent")
     team = result.get("team_agents")
