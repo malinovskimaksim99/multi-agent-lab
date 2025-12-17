@@ -17,6 +17,83 @@ def learn_from_tags(memory, tags):
         set_flag(memory, "expand_when_short", True)
 
 
+class HeadAgent:
+    """
+    Простий локальний "головний агент" для чат-режиму.
+
+    Він:
+    - приймає вхідний текст користувача;
+    - обробляє службові /memory, /agents, /route;
+    - пробує знайти natural-language команду через match_command();
+    - якщо це не команда, делегує задачу Supervisor-у.
+    """
+
+    def __init__(self, sup: Supervisor, memory: dict, args: argparse.Namespace):
+        self.sup = sup
+        self.memory = memory
+        self.args = args
+
+    def handle(self, task: str) -> bool:
+        """
+        Обробляє один запит користувача.
+        Повертає False, якщо потрібно завершити чат (exit/quit), інакше True.
+        """
+        if not task:
+            return True
+
+        if task.lower() in {"exit", "quit"}:
+            return False
+
+        # --- slash service commands ---
+        if task in {"/memory", ":memory"}:
+            print(json.dumps(load_memory(), ensure_ascii=False, indent=2))
+            return True
+
+        if task in {"/agents", ":agents"}:
+            print("Registered agents:", ", ".join(list_agents()))
+            return True
+
+        if task.startswith("/route"):
+            query = task[len("/route"):].strip()
+            if not query:
+                print("Usage: /route <task>")
+                return True
+
+            ranked = rank_agents(query, self.memory)
+            print("Routing scores:")
+            for name, score in ranked:
+                print(f" - {name}: {score:.2f}")
+            return True
+
+        # --- natural language commands ---
+        handler = match_command(task)
+        if handler:
+            out = handler()
+            print("\nAssistant:\n")
+            print(out)
+            return True
+
+        # --- normal agent task (через Supervisor) ---
+        result = self.sup.run(task, self.memory)
+
+        solver_name = result.get("solver_agent", "unknown")
+        team_agents = result.get("team_agents")
+
+        header = f"solver: {solver_name}"
+        if team_agents:
+            header += f" | team: {', '.join(team_agents)}"
+
+        print(f"\nAssistant ({header}):\n")
+        print(result["final"])
+
+        if self.args.learn:
+            tags = result.get("critique_tags", []) or []
+            learn_from_tags(self.memory, tags)
+            save_memory(self.memory)
+
+        return True
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--learn", action="store_true", help="Update memory flags after each task.")
@@ -32,63 +109,16 @@ def main():
         team_size=args.team_size,
     )
 
+    head = HeadAgent(sup, memory, args)
+
     print("Multi-agent chat. Type 'exit' to quit.")
     print("Commands: /memory, /agents, /route <task> + natural commands like 'зроби звіт'")
 
     while True:
         task = input("\nYou: ").strip()
-        if not task:
-            continue
-
-        if task.lower() in {"exit", "quit"}:
+        should_continue = head.handle(task)
+        if not should_continue:
             break
-
-        # --- slash service commands ---
-        if task in {"/memory", ":memory"}:
-            print(json.dumps(load_memory(), ensure_ascii=False, indent=2))
-            continue
-
-        if task in {"/agents", ":agents"}:
-            print("Registered agents:", ", ".join(list_agents()))
-            continue
-
-        if task.startswith("/route"):
-            query = task[len("/route"):].strip()
-            if not query:
-                print("Usage: /route <task>")
-                continue
-
-            ranked = rank_agents(query, memory)
-            print("Routing scores:")
-            for name, score in ranked:
-                print(f" - {name}: {score:.2f}")
-            continue
-
-        # --- natural language commands ---
-        handler = match_command(task)
-        if handler:
-            out = handler()
-            print("\nAssistant:\n")
-            print(out)
-            continue
-
-        # --- normal agent task ---
-        result = sup.run(task, memory)
-
-        solver_name = result.get("solver_agent", "unknown")
-        team_agents = result.get("team_agents")
-
-        header = f"solver: {solver_name}"
-        if team_agents:
-            header += f" | team: {', '.join(team_agents)}"
-
-        print(f"\nAssistant ({header}):\n")
-        print(result["final"])
-
-        if args.learn:
-            tags = result.get("critique_tags", []) or []
-            learn_from_tags(memory, tags)
-            save_memory(memory)
 
 
 if __name__ == "__main__":
