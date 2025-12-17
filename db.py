@@ -120,6 +120,84 @@ def init_db() -> None:
         """
     )
 
+    # Таблиці для письменницьких проєктів (книги, глави, сцени, персонажі, сюжетні арки)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS writing_projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            status TEXT,
+            synopsis TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chapters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            number INTEGER,
+            title TEXT,
+            summary TEXT,
+            status TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scenes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            chapter_id INTEGER NOT NULL,
+            title TEXT,
+            summary TEXT,
+            content TEXT,
+            status TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS characters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            book_id INTEGER,
+            name TEXT NOT NULL,
+            role TEXT,
+            description TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS story_arcs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            book_id INTEGER,
+            name TEXT NOT NULL,
+            description TEXT,
+            status TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
     # Таблиця налаштувань проєктів (key/value, як для конфігів агентів)
     cur.execute(
         """
@@ -848,6 +926,402 @@ def set_current_project(name: str) -> None:
 
     conn.commit()
     conn.close()
+
+
+# ----------------- Writing projects helpers -----------------
+
+
+def create_writing_project(
+    project_name: str,
+    title: Optional[str] = None,
+    synopsis: str = "",
+) -> Dict[str, Any]:
+    """
+    Створює (або знаходить) письменницький проєкт.
+
+    - гарантує наявність запису в projects з name=project_name (type='writing', status='active');
+    - створює запис у writing_projects з title (за замовчуванням дорівнює project_name);
+    - повертає dict з основною інформацією про книгу/проєкт.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+
+    # 1) Переконуємось, що є запис у projects
+    cur.execute(
+        "SELECT id, type FROM projects WHERE name = ?",
+        (project_name,),
+    )
+    row = cur.fetchone()
+    if row:
+        project_id = row["id"]
+    else:
+        cur.execute(
+            """
+            INSERT INTO projects (name, type, description, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_name,
+                "writing",
+                f"Письменницький проєкт {project_name}",
+                "active",
+                now,
+                now,
+            ),
+        )
+        project_id = cur.lastrowid
+
+    # 2) Створюємо (або знаходимо) запис у writing_projects
+    effective_title = title or project_name
+    cur.execute(
+        """
+        SELECT id, title, status, synopsis
+        FROM writing_projects
+        WHERE project_id = ? AND title = ?
+        """,
+        (project_id, effective_title),
+    )
+    wrow = cur.fetchone()
+    if wrow:
+        result = {
+            "id": wrow["id"],
+            "project_id": project_id,
+            "title": wrow["title"],
+            "status": wrow["status"],
+            "synopsis": wrow["synopsis"],
+        }
+        conn.close()
+        return result
+
+    cur.execute(
+        """
+        INSERT INTO writing_projects (project_id, title, status, synopsis, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (project_id, effective_title, "active", synopsis, now, now),
+    )
+    book_id = cur.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "id": book_id,
+        "project_id": project_id,
+        "title": effective_title,
+        "status": "active",
+        "synopsis": synopsis,
+    }
+
+
+def get_writing_projects(project_name: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Повертає список письменницьких проєктів (writing_projects).
+
+    Якщо project_name вказано — фільтрує по цьому проєкту.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    params: List[Any] = []
+    where_clause = ""
+
+    if project_name is not None:
+        cur.execute(
+            "SELECT id FROM projects WHERE name = ?",
+            (project_name,),
+        )
+        prow = cur.fetchone()
+        if not prow:
+            conn.close()
+            return []
+        project_id = prow["id"]
+        where_clause = "WHERE wp.project_id = ?"
+        params.append(project_id)
+
+    cur.execute(
+        f"""
+        SELECT
+            wp.id,
+            wp.project_id,
+            wp.title,
+            wp.status,
+            wp.synopsis,
+            wp.created_at,
+            wp.updated_at,
+            p.name AS project_name
+        FROM writing_projects wp
+        JOIN projects p ON p.id = wp.project_id
+        {where_clause}
+        ORDER BY wp.id ASC
+        """,
+        tuple(params),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    books: List[Dict[str, Any]] = []
+    for r in rows:
+        books.append(
+            {
+                "id": r["id"],
+                "project_id": r["project_id"],
+                "project_name": r["project_name"],
+                "title": r["title"],
+                "status": r["status"],
+                "synopsis": r["synopsis"],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            }
+        )
+    return books
+
+
+def add_chapter(
+    book_id: int,
+    title: str,
+    number: Optional[int] = None,
+    summary: str = "",
+    status: str = "planned",
+) -> Dict[str, Any]:
+    """
+    Додає главу до книги (writing_projects.id = book_id).
+
+    Якщо number не вказано — автоматично обирається наступний номер (MAX(number)+1).
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Витягуємо project_id з writing_projects
+    cur.execute(
+        "SELECT project_id FROM writing_projects WHERE id = ?",
+        (book_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise ValueError(f"Writing project (book) with id={book_id} not found")
+
+    project_id = row["project_id"]
+
+    if number is None:
+        cur.execute(
+            "SELECT COALESCE(MAX(number), 0) + 1 FROM chapters WHERE book_id = ?",
+            (book_id,),
+        )
+        next_number_row = cur.fetchone()
+        number = int(next_number_row[0]) if next_number_row and next_number_row[0] is not None else 1
+
+    cur.execute(
+        """
+        INSERT INTO chapters (
+            project_id,
+            book_id,
+            number,
+            title,
+            summary,
+            status,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (project_id, book_id, number, title, summary, status, now, now),
+    )
+    chapter_id = cur.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "id": chapter_id,
+        "project_id": project_id,
+        "book_id": book_id,
+        "number": number,
+        "title": title,
+        "summary": summary,
+        "status": status,
+    }
+
+
+def add_scene(
+    chapter_id: int,
+    title: str,
+    summary: str = "",
+    content: str = "",
+    status: str = "draft",
+) -> Dict[str, Any]:
+    """
+    Додає сцену до глави.
+
+    project_id і book_id автоматично беруться з chapters.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Витягуємо project_id і book_id з chapters
+    cur.execute(
+        "SELECT project_id, book_id FROM chapters WHERE id = ?",
+        (chapter_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise ValueError(f"Chapter with id={chapter_id} not found")
+
+    project_id = row["project_id"]
+    book_id = row["book_id"]
+
+    cur.execute(
+        """
+        INSERT INTO scenes (
+            project_id,
+            book_id,
+            chapter_id,
+            title,
+            summary,
+            content,
+            status,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (project_id, book_id, chapter_id, title, summary, content, status, now, now),
+    )
+    scene_id = cur.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "id": scene_id,
+        "project_id": project_id,
+        "book_id": book_id,
+        "chapter_id": chapter_id,
+        "title": title,
+        "summary": summary,
+        "content": content,
+        "status": status,
+    }
+
+
+def get_book_outline(book_id: int) -> Dict[str, Any]:
+    """
+    Повертає структуру книги: заголовок + список глав і сцен.
+
+    Формат:
+    {
+        "book": {...},
+        "chapters": [
+            {
+                "id": ...,
+                "number": ...,
+                "title": ...,
+                "status": ...,
+                "summary": ...,
+                "scenes": [
+                    {"id": ..., "title": ..., "status": ...},
+                    ...
+                ]
+            },
+            ...
+        ]
+    }
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Книга
+    cur.execute(
+        """
+        SELECT wp.id, wp.project_id, wp.title, wp.status, wp.synopsis,
+               wp.created_at, wp.updated_at, p.name AS project_name
+        FROM writing_projects wp
+        JOIN projects p ON p.id = wp.project_id
+        WHERE wp.id = ?
+        """,
+        (book_id,),
+    )
+    book_row = cur.fetchone()
+    if not book_row:
+        conn.close()
+        raise ValueError(f"Writing project (book) with id={book_id} not found")
+
+    book_info = {
+        "id": book_row["id"],
+        "project_id": book_row["project_id"],
+        "project_name": book_row["project_name"],
+        "title": book_row["title"],
+        "status": book_row["status"],
+        "synopsis": book_row["synopsis"],
+        "created_at": book_row["created_at"],
+        "updated_at": book_row["updated_at"],
+    }
+
+    # Глави
+    cur.execute(
+        """
+        SELECT id, number, title, summary, status, created_at, updated_at
+        FROM chapters
+        WHERE book_id = ?
+        ORDER BY number ASC, id ASC
+        """,
+        (book_id,),
+    )
+    chapter_rows = cur.fetchall()
+
+    # Сцени для всіх глав
+    chapter_ids = [r["id"] for r in chapter_rows]
+    scenes_by_chapter: Dict[int, List[Dict[str, Any]]] = {}
+    if chapter_ids:
+        placeholders = ",".join("?" for _ in chapter_ids)
+        cur.execute(
+            f"""
+            SELECT id, chapter_id, title, status
+            FROM scenes
+            WHERE chapter_id IN ({placeholders})
+            ORDER BY id ASC
+            """,
+            tuple(chapter_ids),
+        )
+        scene_rows = cur.fetchall()
+        for s in scene_rows:
+            cid = s["chapter_id"]
+            scenes_by_chapter.setdefault(cid, []).append(
+                {
+                    "id": s["id"],
+                    "chapter_id": cid,
+                    "title": s["title"],
+                    "status": s["status"],
+                }
+            )
+
+    conn.close()
+
+    chapters: List[Dict[str, Any]] = []
+    for r in chapter_rows:
+        cid = r["id"]
+        chapters.append(
+            {
+                "id": cid,
+                "number": r["number"],
+                "title": r["title"],
+                "summary": r["summary"],
+                "status": r["status"],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+                "scenes": scenes_by_chapter.get(cid, []),
+            }
+        )
+
+    return {
+        "book": book_info,
+        "chapters": chapters,
+    }
 
 def get_solver_stats_by_task_type(task_type: str) -> Dict[str, int]:
     """

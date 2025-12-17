@@ -307,6 +307,422 @@ def _current_project_from_text(text: str) -> str:
     """
     return show_current_project()
 
+# --- Writing projects and books helpers ---
+def _create_writing_project_book_from_text(text: str) -> str:
+    """
+    Створити письменницький проєкт-книгу з назвою (у лапках) із тексту.
+    """
+    import sqlite3
+    import re
+    from datetime import datetime, timezone
+    # Шукаємо назву книги в лапках (", ', “, ”)
+    m = re.search(r'[\"\'“”]([^\"\'“”]+)[\"\'“”]', text)
+    if not m:
+        return "Будь ласка, вкажіть назву книги у лапках (наприклад: \"Моя книга\")."
+    title = m.group(1).strip()
+    now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+    conn = None
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor()
+        # Спробуємо вставити новий проєкт
+        try:
+            cur.execute(
+                """
+                INSERT INTO projects (name, type, description, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    title,
+                    "writing",
+                    f"Письменницький проєкт книги '{title}'",
+                    "active",
+                    now,
+                    now,
+                ),
+            )
+            project_id = cur.lastrowid
+            project_existed = False
+        except sqlite3.IntegrityError:
+            # Проєкт із такою назвою вже існує, знайдемо його id
+            cur.execute(
+                "SELECT id, name, type, status FROM projects WHERE name = ? LIMIT 1",
+                (title,),
+            )
+            row = cur.fetchone()
+            if row:
+                project_id = row[0]
+                project_existed = True
+            else:
+                return f"Не вдалося знайти існуючий проєкт із назвою '{title}' після помилки унікальності."
+        # Додаємо книгу
+        cur.execute(
+            """
+            INSERT INTO books (project_id, title, status, synopsis, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                title,
+                "active",
+                "",
+                now,
+                now,
+            ),
+        )
+        book_id = cur.lastrowid
+        conn.commit()
+        if not project_existed:
+            return f"Створено проєкт-книгу '{title}' (project_id={project_id}, book_id={book_id})."
+        else:
+            return f"Використано існуючий проєкт '{title}' (project_id={project_id}), створено книгу (book_id={book_id})."
+    except Exception as e:
+        return f"Не вдалося створити проєкт-книгу: {e}"
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+def _show_writing_books_from_text(text: str) -> str:
+    """
+    Показати список письменницьких проєктів (книг)
+    """
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT b.id, b.title, b.status, p.name, p.type
+            FROM books b
+            LEFT JOIN projects p ON p.id = b.project_id
+            ORDER BY b.id ASC
+            """
+        )
+        rows = cur.fetchall()
+    except Exception as e:
+        return f"Не вдалося прочитати список письменницьких проєктів (книг): {e}"
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    if not rows:
+        return "Письменницькі проєкти (книги) поки відсутні."
+    lines = ["Список письменницьких проєктів (книг):"]
+    for bid, title, status, pname, ptype in rows:
+        lines.append(
+            f"- book_id={bid} | title={title} | status={status} | project={pname} ({ptype})"
+        )
+    return "\n".join(lines)
+
+def _show_book_outline_from_text(text: str) -> str:
+    """
+    Показати структуру (план) книги за book_id або останньої оновленої, якщо id не вказано.
+    """
+    import re
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor()
+        m = re.search(r"\b(\d+)\b", text)
+        if m:
+            book_id = int(m.group(1))
+        else:
+            # Вибрати останню оновлену книгу
+            cur.execute(
+                """
+                SELECT id, title, status
+                FROM books
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            if not row:
+                return "Немає жодної книги для показу плану."
+            book_id = row[0]
+        # Витягуємо info про книгу + проект
+        cur.execute(
+            """
+            SELECT b.id, b.title, b.status, b.synopsis, p.name, p.type
+            FROM books b
+            LEFT JOIN projects p ON p.id = b.project_id
+            WHERE b.id = ?
+            """,
+            (book_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return f"Книгу з id={book_id} не знайдено."
+        bid, title, status, synopsis, project_name, project_type = row
+        lines = ["=== План книги ==="]
+        lines.append(f"Книга {bid}: {title} [{status}] (проєкт: {project_name})")
+        if synopsis and synopsis.strip():
+            lines.append(f"Синопсис: {synopsis}")
+        # Витягуємо глави
+        cur.execute(
+            """
+            SELECT id, number, title, status, summary
+            FROM chapters
+            WHERE book_id = ?
+            ORDER BY number ASC, id ASC
+            """,
+            (book_id,),
+        )
+        chapters = cur.fetchall()
+        for ch in chapters:
+            ch_id, ch_num, ch_title, ch_status, ch_summary = ch
+            line = f"- Глава {ch_num}: {ch_title} [{ch_status}]"
+            if ch_summary and ch_summary.strip():
+                line += f" | {ch_summary}"
+            lines.append(line)
+            # Витягуємо сцени цієї глави
+            cur.execute(
+                """
+                SELECT id, title, status, summary
+                FROM scenes
+                WHERE book_id = ? AND chapter_id = ?
+                ORDER BY id ASC
+                """,
+                (book_id, ch_id),
+            )
+            scenes = cur.fetchall()
+            for sc in scenes:
+                sc_id, sc_title, sc_status, sc_summary = sc
+                sline = f"  * Сцена {sc_id}: {sc_title} [{sc_status}]"
+                if sc_summary and sc_summary.strip():
+                    sline += f" | {sc_summary}"
+                lines.append(sline)
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Не вдалося показати план книги: {e}"
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+# --- Add chapter/scene helpers ---
+def _add_chapter_from_text(text: str) -> str:
+    """
+    Додати нову главу до книги.
+
+    Правила:
+    - якщо в тексті є число, воно інтерпретується як book_id;
+    - якщо числа немає — беремо останню оновлену книгу;
+    - якщо є назва в лапках — використовуємо її як title;
+    - номер глави вибирається як max(number) + 1 для цієї книги.
+    """
+    import re
+
+    conn = None
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor()
+
+        # Визначаємо book_id
+        m_id = re.search(r"\b(\d+)\b", text)
+        if m_id:
+            book_id = int(m_id.group(1))
+        else:
+            # Беремо останню оновлену книгу
+            cur.execute(
+                """
+                SELECT id
+                FROM books
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            if not row:
+                return "Немає жодної книги, до якої можна додати главу."
+            book_id = row[0]
+
+        # Витягуємо project_id книги
+        cur.execute(
+            "SELECT project_id FROM books WHERE id = ?",
+            (book_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return f"Книгу з id={book_id} не знайдено."
+        project_id = row[0]
+
+        # Обчислюємо наступний номер глави
+        cur.execute(
+            "SELECT COALESCE(MAX(number), 0) FROM chapters WHERE book_id = ?",
+            (book_id,),
+        )
+        max_num_row = cur.fetchone()
+        next_number = (max_num_row[0] if max_num_row else 0) + 1
+
+        # Назва глави з лапок, якщо є
+        m_title = re.search(r'[\"\'“”]([^\"\'“”]+)[\"\'“”]', text)
+        if m_title:
+            title = m_title.group(1).strip()
+        else:
+            title = f"Глава {next_number}"
+
+        summary = ""
+        status = "planned"
+
+        cur.execute(
+            """
+            INSERT INTO chapters (project_id, book_id, number, title, summary, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (project_id, book_id, next_number, title, summary, status),
+        )
+        chapter_id = cur.lastrowid
+
+        # Оновлюємо updated_at книги, якщо поле є
+        try:
+            now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+            cur.execute(
+                "UPDATE books SET updated_at = ? WHERE id = ?",
+                (now, book_id),
+            )
+        except Exception:
+            pass
+
+        conn.commit()
+        return (
+            f"Додано главу номер {next_number} до книги id={book_id} "
+            f"з назвою '{title}' (chapter_id={chapter_id})."
+        )
+    except Exception as e:
+        return f"Не вдалося додати главу: {e}"
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _add_scene_from_text(text: str) -> str:
+    """
+    Додати нову сцену до книги/глави.
+
+    Просте правило:
+    - працюємо з останньою оновленою книгою, якщо явно не вказаний book_id;
+    - сцену додаємо в останню главу цієї книги;
+    - якщо є текст у лапках — це title сцени;
+    - summary залишаємо порожнім, content='...', status='draft'.
+    """
+    import re
+
+    conn = None
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor()
+
+        # Визначаємо book_id (якщо є число в тексті — трактуємо як book_id)
+        m_id = re.search(r"\b(\d+)\b", text)
+        if m_id:
+            book_id = int(m_id.group(1))
+        else:
+            cur.execute(
+                """
+                SELECT id
+                FROM books
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            if not row:
+                return "Немає жодної книги, до якої можна додати сцену."
+            book_id = row[0]
+
+        # Перевіряємо існуючу книгу та project_id
+        cur.execute(
+            "SELECT project_id FROM books WHERE id = ?",
+            (book_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return f"Книгу з id={book_id} не знайдено."
+        project_id = row[0]
+
+        # Беремо останню главу цієї книги
+        cur.execute(
+            """
+            SELECT id, number, title
+            FROM chapters
+            WHERE book_id = ?
+            ORDER BY number DESC, id DESC
+            LIMIT 1
+            """,
+            (book_id,),
+        )
+        ch = cur.fetchone()
+        if not ch:
+            return (
+                "У цієї книги ще немає глав. "
+                "Спочатку додай хоча б одну главу командою на кшталт: "
+                "\"додай главу \\\"Назва глави\\\"\"."
+            )
+        chapter_id, chapter_number, chapter_title = ch
+
+        # Назва сцени з лапок, якщо є
+        m_title = re.search(r'[\"\'“”]([^\"\'“”]+)[\"\'“”]', text)
+        if m_title:
+            title = m_title.group(1).strip()
+        else:
+            # Порахуємо скільки сцен уже є в цій главі
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM scenes
+                WHERE book_id = ? AND chapter_id = ?
+                """,
+                (book_id, chapter_id),
+            )
+            cnt_row = cur.fetchone()
+            next_scene_index = (cnt_row[0] if cnt_row else 0) + 1
+            title = f"Сцена {next_scene_index}"
+
+        summary = ""
+        content = "..."
+        status = "draft"
+
+        cur.execute(
+            """
+            INSERT INTO scenes (project_id, book_id, chapter_id, title, summary, content, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (project_id, book_id, chapter_id, title, summary, content, status),
+        )
+        scene_id = cur.lastrowid
+
+        # Оновлюємо updated_at книги, якщо поле є
+        try:
+            now = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+            cur.execute(
+                "UPDATE books SET updated_at = ? WHERE id = ?",
+                (now, book_id),
+            )
+        except Exception:
+            pass
+
+        conn.commit()
+        return (
+            f"Додано сцену до книги id={book_id}, глави {chapter_number} "
+            f"('{chapter_title}') з назвою '{title}' (scene_id={scene_id})."
+        )
+    except Exception as e:
+        return f"Не вдалося додати сцену: {e}"
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
 
 def _db_runs_from_text(text: str) -> str:
     limit = _extract_limit(text, default=10)
@@ -617,6 +1033,10 @@ def help_text() -> str:
         "- покажи датасет / dataset\n"
         "- аналіз агентів / аналіз запусків\n"
         "- список проєктів / projects list\n"
+        "- письменницькі проєкти / books list\n"
+        "- план книги / book outline\n"
+        "- додай главу / add chapter\n"
+        "- додай сцену / add scene\n"
         "- поточний проєкт / current project\n"
         "- meta тренування / meta training\n"
         "- застосуй пропозиції тренера / trainer apply configs\n"
@@ -775,6 +1195,67 @@ COMMANDS: List[Dict[str, Any]] = [
         ],
         "handler": _current_project_from_text,
     },
+    # --- Writing projects and books commands ---
+    {
+        "name": "create_writing_project",
+        "patterns": [
+            "створи проєкт-книгу",
+            "створи проект-книгу",
+            "створи книжковий проєкт",
+            "створи проєкт книги",
+            "create book project",
+            "create writing project",
+        ],
+        "handler": _create_writing_project_book_from_text,
+    },
+    {
+        "name": "writing_projects",
+        "patterns": [
+            "письменницькі проєкти",
+            "книжкові проєкти",
+            "проєкти-книги",
+            "проекти-книги",
+            "books list",
+            "writing projects",
+            "список книг",
+            "список книжок",
+            "письменицькі проекти",
+        ],
+        "handler": _show_writing_books_from_text,
+    },
+    {
+        "name": "add_chapter",
+        "patterns": [
+            "додай главу",
+            "додати главу",
+            "add chapter",
+        ],
+        "handler": _add_chapter_from_text,
+    },
+    {
+        "name": "add_scene",
+        "patterns": [
+            "додай сцену",
+            "додати сцену",
+            "add scene",
+            "додай сцену в главу",
+        ],
+        "handler": _add_scene_from_text,
+    },
+    {
+        "name": "writing_outline",
+        "patterns": [
+            "план книги",
+            "outline книги",
+            "структура книги",
+            "план книжки",
+            "book outline",
+            "show book outline",
+            "план книгі",
+        ],
+        "handler": _show_book_outline_from_text,
+    },
+    # --- End writing projects commands ---
     {
         "name": "meta_train",
         "patterns": [
@@ -817,6 +1298,14 @@ def match_command(text: str) -> Optional[Callable[[], str]]:
     # smart fallback for current project when користувач пише просто "проєкт"/"проект"/"project"
     if t in ("проєкт", "проект", "project"):
         return lambda x=text: _current_project_from_text(x)
+
+    # smart fallback for writing projects (even with typos like "письменицькі проекти")
+    if "письменицьк" in t or "письменницьк" in t or "книжкові проєкти" in t or "книжкові проекти" in t:
+        return lambda x=text: _show_writing_books_from_text(x)
+
+    # smart fallback for book outline / plan (including typo "книгі")
+    if ("план" in t or "outline" in t or "структура" in t) and ("книг" in t or "книж" in t or "книгі" in t):
+        return lambda x=text: _show_book_outline_from_text(x)
 
     # smart fallback for "runs" with declensions/typos
     # вимагає наявності слова "покажи" або "show", щоб не перехоплювати фрази типу "аналіз 30 останніх запусків"
