@@ -1,5 +1,3 @@
-
-
 """
 Minimal HTTP API wrapper around multi-agent-lab.
 
@@ -9,12 +7,14 @@ Minimal HTTP API wrapper around multi-agent-lab.
 Цей сервер просто викликає `app.py` як CLI,
 щоб не лізти у внутрішню реалізацію Supervisor / HeadAgent.
 """
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import subprocess
 import sys
 from typing import Optional
+
+from db import get_projects, get_book_outline
 
 
 app = FastAPI(title="multi-agent-lab API")
@@ -75,6 +75,31 @@ async def root() -> str:
                 color: #9ca3af;
                 margin-top: 4px;
             }
+            .projects-list {
+                margin-top: 8px;
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+            }
+            .project-item {
+                border-radius: 6px;
+                padding: 6px 8px;
+                background: #020617;
+                border: 1px solid #1f2933;
+                cursor: default;
+            }
+            .project-item.active {
+                border-color: #22c55e;
+                box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.3);
+            }
+            .project-name {
+                font-size: 13px;
+                color: #e5e7eb;
+            }
+            .project-meta {
+                font-size: 11px;
+                color: #9ca3af;
+            }
             .main {
                 flex: 1;
                 display: flex;
@@ -87,6 +112,66 @@ async def root() -> str:
                 border-bottom: 1px solid #1f2933;
                 font-size: 14px;
                 color: #9ca3af;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+            }
+            .header-text {
+                flex: 1;
+            }
+            .structure-panel {
+                border-bottom: 1px solid #1f2933;
+                background: #020617;
+                padding: 8px 16px 12px;
+                max-height: 260px;
+                overflow-y: auto;
+                box-sizing: border-box;
+                font-size: 13px;
+            }
+            .structure-panel.hidden {
+                display: none;
+            }
+            .structure-header {
+                font-size: 13px;
+                color: #9ca3af;
+                margin-bottom: 4px;
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+            }
+            .structure-header-row {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 4px;
+            }
+            .btn-ghost {
+                border-radius: 6px;
+                border: 1px solid #374151;
+                padding: 2px 8px;
+                font-size: 11px;
+                cursor: pointer;
+                background: transparent;
+                color: #9ca3af;
+            }
+            .btn-ghost:hover {
+                border-color: #4b5563;
+                color: #e5e7eb;
+            }
+            .structure-body {
+                color: #e5e7eb;
+            }
+            .btn-secondary {
+                border-radius: 8px;
+                border: 1px solid #374151;
+                padding: 6px 10px;
+                font-size: 12px;
+                cursor: pointer;
+                background: #020617;
+                color: #e5e7eb;
+            }
+            .btn-secondary:hover {
+                border-color: #4b5563;
             }
             .chat-log {
                 flex: 1;
@@ -186,14 +271,33 @@ async def root() -> str:
         <div class="sidebar">
             <h1>multi-agent-lab</h1>
             <div>
-                <strong>Проєкт:</strong>
-                <div id="current-project">Розробка</div>
+                <strong>Проєкти:</strong>
+                <div id="projects-list" class="projects-list">
+                    <!-- Тимчасово — один проєкт. Після fetch /projects список оновиться. -->
+                    <div class="project-item active">
+                        <div class="project-name">Розробка</div>
+                        <div class="project-meta">dev</div>
+                    </div>
+                </div>
                 <small>Поки що цей UI працює з поточним проєктом.</small>
             </div>
         </div>
         <div class="main">
             <div class="header">
-                Простий чат з /chat (app.py). Далі будемо розвивати до повного робочого середовища.
+                <div class="header-text">
+                    Простий чат з /chat (app.py). Далі будемо розвивати до повного робочого середовища.
+                </div>
+                <button id="toggle-structure" class="btn-secondary">Структура ▼</button>
+            </div>
+            <div id="structure-panel" class="structure-panel hidden">
+                <div class="structure-header-row">
+                    <div class="structure-header">Структура проєкту</div>
+                    <button id="refresh-outline" class="btn-ghost">Оновити</button>
+                </div>
+                <div class="structure-body">
+                    <p>Тут буде дерево: Книга → Глави → Сцени та ключові сюжетні розгалуження.</p>
+                    <p>Якщо структура не оновилась, натисни «Оновити».</p>
+                </div>
             </div>
             <div id="log" class="chat-log"></div>
             <div class="input-bar">
@@ -211,25 +315,212 @@ async def root() -> str:
             </div>
         </div>
         <script>
+            // Тимчасово фіксований id тестової книги для панелі структури.
+            // Пізніше зробимо вибір книги за поточним проєктом.
+            const OUTLINE_BOOK_ID = 2;
+
             const taskEl = document.getElementById('task');
             const autoEl = document.getElementById('auto');
             const sendBtn = document.getElementById('send');
             const logEl = document.getElementById('log');
             const statusEl = document.getElementById('status');
+            const toggleStructureBtn = document.getElementById('toggle-structure');
+            const structurePanel = document.getElementById('structure-panel');
+            const structureBody = document.querySelector('.structure-body');
+            const refreshOutlineBtn = document.getElementById('refresh-outline');
+            const projectsListEl = document.getElementById('projects-list');
+            let structureVisible = false;
+            let outlineLoaded = false;
+            // Поточний проєкт, обраний у сайдбарі
+            let currentProjectId = null;
+            let currentProjectType = null;
 
-            function appendMessage(who, text) {
-                const div = document.createElement('div');
-                div.className = 'msg ' + (who === 'You' ? 'me' : 'bot');
-                const whoEl = document.createElement('div');
-                whoEl.className = 'who';
-                whoEl.textContent = who;
-                const bubble = document.createElement('div');
-                bubble.className = 'bubble';
-                bubble.textContent = text;
-                div.appendChild(whoEl);
-                div.appendChild(bubble);
-                logEl.appendChild(div);
-                logEl.scrollTop = logEl.scrollHeight;
+            async function loadProjects() {
+                if (!projectsListEl) return;
+
+                try {
+                    const resp = await fetch('/projects');
+                    if (!resp.ok) {
+                        throw new Error('HTTP ' + resp.status);
+                    }
+                    const data = await resp.json();
+                    renderProjects(data.projects || []);
+                } catch (err) {
+                    console.error(err);
+                    projectsListEl.innerHTML =
+                        '<div class="project-item"><div class="project-name">Помилка завантаження проєктів</div></div>';
+                }
+            }
+
+            function renderProjects(projects) {
+                if (!projectsListEl) return;
+
+                if (!projects.length) {
+                    projectsListEl.innerHTML =
+                        '<div class="project-item"><div class="project-name">Немає проєктів</div></div>';
+                    currentProjectId = null;
+                    currentProjectType = null;
+                    return;
+                }
+
+                let html = '';
+                for (const p of projects) {
+                    const isActive = (p.status === 'active');
+                    // Якщо ще не обрано поточний проєкт — беремо перший active
+                    if (isActive && currentProjectId === null) {
+                        currentProjectId = p.id;
+                        currentProjectType = p.type || null;
+                    }
+                    html += '<div class="project-item' + (isActive ? ' active' : '') + '" ' +
+                            'data-project-id="' + p.id + '" ' +
+                            'data-project-type="' + (p.type || '') + '">';
+                    html += '<div class="project-name">' + (p.name || 'Без назви') + '</div>';
+                    if (p.type) {
+                        html += '<div class="project-meta">' + p.type + '</div>';
+                    }
+                    html += '</div>';
+                }
+                projectsListEl.innerHTML = html;
+
+                // Навішуємо клік‑обробники для вибору поточного проєкту
+                const items = projectsListEl.querySelectorAll('.project-item');
+                items.forEach((el) => {
+                    el.addEventListener('click', () => {
+                        const pid = el.getAttribute('data-project-id');
+                        const ptype = el.getAttribute('data-project-type') || null;
+                        currentProjectId = pid ? parseInt(pid, 10) : null;
+                        currentProjectType = ptype;
+
+                        items.forEach((i) => i.classList.remove('active'));
+                        el.classList.add('active');
+
+                        // Якщо відкрита панель структури — оновлюємо її для вибраного проєкту
+                        if (structureVisible) {
+                            loadOutlineForCurrentProject();
+                        }
+                    });
+                });
+            }
+
+            if (toggleStructureBtn && structurePanel) {
+                toggleStructureBtn.addEventListener('click', () => {
+                    structureVisible = !structureVisible;
+                    if (structureVisible) {
+                        structurePanel.classList.remove('hidden');
+                        toggleStructureBtn.textContent = 'Структура ▲';
+                        // Перший раз при відкритті — завантажуємо структуру
+                        if (!outlineLoaded) {
+                            loadOutlineForCurrentProject();
+                        }
+                    } else {
+                        structurePanel.classList.add('hidden');
+                        toggleStructureBtn.textContent = 'Структура ▼';
+                    }
+                });
+            }
+
+            if (refreshOutlineBtn && structurePanel) {
+                refreshOutlineBtn.addEventListener('click', () => {
+                    loadOutlineForCurrentProject();
+                });
+            }
+            function loadOutlineForCurrentProject() {
+                if (!structureBody) return;
+
+                // Поки що для non-writing проєктів показуємо простий текст.
+                if (!currentProjectId) {
+                    structureBody.innerHTML = '<p>Поточний проєкт не вибрано.</p>';
+                    return;
+                }
+                if (currentProjectType !== 'writing') {
+                    structureBody.innerHTML =
+                        '<p>Для проєкту типу <code>' + (currentProjectType || 'unknown') +
+                        '</code> структура книги ще не налаштована.</p>';
+                    return;
+                }
+
+                // Тимчасово: використовуємо фіксований OUTLINE_BOOK_ID.
+                // Пізніше підʼєднаємо справжній пошук книги за проєктом.
+                loadOutline(OUTLINE_BOOK_ID);
+            }
+
+            async function loadOutline(bookId) {
+                if (!structureBody) return;
+                structureBody.innerHTML = '<p>Завантаження структури…</p>';
+
+                try {
+                    const resp = await fetch('/writing/outline?book_id=' + bookId);
+                    if (!resp.ok) {
+                        throw new Error('HTTP ' + resp.status);
+                    }
+                    const data = await resp.json();
+                    renderOutline(data);
+                    outlineLoaded = true;
+                } catch (err) {
+                    console.error(err);
+                    structureBody.innerHTML =
+                        '<p>Не вдалося завантажити структуру: ' + err.message + '</p>';
+                }
+            }
+
+            function renderOutline(data) {
+                if (!structureBody) return;
+
+                if (!data || !data.book) {
+                    structureBody.innerHTML = '<p>Структура відсутня.</p>';
+                    return;
+                }
+
+                const book = data.book;
+                const chapters = data.chapters || [];
+                let html = '';
+
+                html += '<div><strong>Книга:</strong> ' + book.title +
+                        ' <span style="color:#9ca3af;">[' + (book.status || 'unknown') + ']</span></div>';
+
+                if (book.project_name) {
+                    html += '<div style="font-size:12px;color:#9ca3af;">Проєкт: ' +
+                            book.project_name + '</div>';
+                }
+
+                if (book.synopsis) {
+                    html += '<p style="margin-top:4px;">' + book.synopsis + '</p>';
+                }
+
+                if (!chapters.length) {
+                    html += '<p>Глави ще не додані.</p>';
+                } else {
+                    html += '<ul style="margin:8px 0 0 0; padding-left:16px;">';
+                    for (const ch of chapters) {
+                        html += '<li>';
+                        html += '<div><strong>Глава ' + (ch.number || '') + ':</strong> ' +
+                                (ch.title || '') +
+                                ' <span style="color:#9ca3af;">[' + (ch.status || 'unknown') + ']</span></div>';
+
+                        if (ch.summary) {
+                            html += '<div style="font-size:12px;color:#9ca3af;margin-bottom:2px;">' +
+                                    ch.summary + '</div>';
+                        }
+
+                        const scenes = ch.scenes || [];
+                        if (scenes.length) {
+                            html += '<ul style="margin:4px 0 4px 16px;padding-left:12px;">';
+                            for (const sc of scenes) {
+                                html += '<li>';
+                                html += '<span>' + (sc.title || 'Сцена') +
+                                        ' <span style="color:#9ca3af;">[' +
+                                        (sc.status || 'unknown') + ']</span></span>';
+                                html += '</li>';
+                            }
+                            html += '</ul>';
+                        }
+
+                        html += '</li>';
+                    }
+                    html += '</ul>';
+                }
+
+                structureBody.innerHTML = html;
             }
 
             async function send() {
@@ -271,6 +562,23 @@ async def root() -> str:
                 }
             }
 
+            function appendMessage(who, text) {
+                const div = document.createElement('div');
+                div.className = 'msg ' + (who === 'You' ? 'me' : 'bot');
+                const whoEl = document.createElement('div');
+                whoEl.className = 'who';
+                whoEl.textContent = who;
+                const bubble = document.createElement('div');
+                bubble.className = 'bubble';
+                bubble.textContent = text;
+                div.appendChild(whoEl);
+                div.appendChild(bubble);
+                logEl.appendChild(div);
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+
+            // При завантаженні сторінки одразу підтягуємо список проєктів
+            loadProjects();
             sendBtn.addEventListener('click', send);
             taskEl.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -318,6 +626,30 @@ async def chat(req: ChatRequest) -> ChatResponse:
         stderr=proc.stderr,
         return_code=proc.returncode,
     )
+
+
+# New endpoints for listing projects and getting book outline
+@app.get("/projects")
+async def list_projects() -> dict:
+    """
+    Повертає список усіх проєктів для UI.
+    """
+    projects = get_projects()
+    return {"projects": projects}
+
+
+@app.get("/writing/outline")
+async def writing_outline(book_id: int):
+    """
+    Повертає структуру книги (outline) за book_id.
+    Використовується UI для відображення книги: заголовок, глави, сцени.
+    """
+    try:
+        outline = get_book_outline(book_id)
+    except ValueError as exc:
+        # Якщо книга не знайдена, повертаємо 404
+        raise HTTPException(status_code=404, detail=str(exc))
+    return outline
 
 
 if __name__ == "__main__":

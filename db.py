@@ -1248,8 +1248,24 @@ def get_book_outline(book_id: int) -> Dict[str, Any]:
     )
     book_row = cur.fetchone()
     if not book_row:
+        # Додатковий діагностичний вивід: покажемо, які книги взагалі є в writing_projects
+        cur.execute(
+            """
+            SELECT id, project_id, title
+            FROM writing_projects
+            ORDER BY id ASC
+            LIMIT 20
+            """
+        )
+        existing_rows = cur.fetchall()
+        existing = [
+            (r["id"], r["project_id"], r["title"])
+            for r in existing_rows
+        ]
         conn.close()
-        raise ValueError(f"Writing project (book) with id={book_id} not found")
+        raise ValueError(
+            f"Writing project (book) with id={book_id} not found; existing books: {existing}"
+        )
 
     book_info = {
         "id": book_row["id"],
