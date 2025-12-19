@@ -14,7 +14,7 @@ import subprocess
 import sys
 from typing import Optional
 
-from db import get_projects, get_book_outline, get_writing_projects
+from db import get_projects, get_book_outline, get_writing_projects, get_current_project
 
 
 app = FastAPI(title="multi-agent-lab API")
@@ -625,6 +625,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     )
 
 
+
 # New endpoints for listing projects and getting book outline
 @app.get("/projects")
 async def list_projects() -> dict:
@@ -633,6 +634,19 @@ async def list_projects() -> dict:
     """
     projects = get_projects()
     return {"projects": projects}
+
+
+# Endpoint for current active project
+@app.get("/projects/current")
+async def current_project() -> dict:
+    """Повертає поточний активний проєкт.
+
+    Використовує get_current_project() з db.py.
+    """
+    project = get_current_project()
+    if not project:
+        raise HTTPException(status_code=404, detail="Current project not found")
+    return {"project": project}
 
 
 @app.get("/writing/outline")

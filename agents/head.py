@@ -4,12 +4,16 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from .supervisor import Supervisor
+
 from db import (
-    list_projects,
+    get_projects,
     get_current_project,
     set_current_project,
     get_recent_errors,  # ми вже додавали це раніше
 )
+
+from .head_profile import build_head_system_prompt
+from ollama_client import call_head_llm
 
 
 class HeadAgent:
@@ -20,6 +24,40 @@ class HeadAgent:
 
     def __init__(self) -> None:
         self.supervisor = Supervisor()
+        # Паспорт / системний промпт для головного агента
+        self.system_prompt = build_head_system_prompt()
+        self.use_ollama_head = True  # цей прапор поки не використовується, але буде корисний далі
+
+    def ask_llm(self, user_text: str) -> str:
+        """
+        Виклик Qwen через Ollama як "мозок" HeadAgent-а.
+
+        Поки що:
+        - використовуємо системний промпт з head_profile,
+        - звертаємось до моделі qwen3-vl:8b,
+        - не обмежуємо max_tokens (щоб не обрізати відповідь штучно),
+        - якщо щось пішло не так — повертаємо зрозуміле повідомлення про помилку.
+        """
+        try:
+            reply = call_head_llm(
+                user_text=user_text,
+                system_prompt=self.system_prompt,
+                model="qwen3-vl:8b",
+                temperature=0.2,
+                # max_tokens не задаємо: довжину контролює сама модель,
+                # а лаконічність ми задаємо в HEAD_SYSTEM_PROMPT.
+            )
+        except Exception as e:
+            return f"[HeadAgent/Qwen помилка: {e}]"
+
+        if not reply:
+            return "[HeadAgent/Qwen не повернув текст відповіді]"
+
+        reply = reply.strip()
+        if not reply:
+            return "[HeadAgent/Qwen повернув лише порожній рядок]"
+
+        return reply
 
     def handle(self, text: str, memory: Any, *, auto: bool = True) -> str:
         """
@@ -37,18 +75,28 @@ class HeadAgent:
             proj = get_current_project()
             if not proj:
                 return "Зараз немає активного проєкту."
-            return (
-                "Поточний проєкт:\n"
-                f"- id={proj['id']}\n"
-                f"- name={proj['name']}\n"
-                f"- type={proj['type']}\n"
-                f"- status={proj['status']}\n"
-                f"- created_at={proj['created_at']}\n"
-                f"- updated_at={proj['updated_at']}\n"
-            )
+
+            # Якщо get_current_project() повертає вже готовий текст (рядок) — просто віддаємо його.
+            if isinstance(proj, str):
+                return proj
+
+            # Інакше очікуємо dict з полями проєкту.
+            try:
+                return (
+                    "Поточний проєкт:\n"
+                    f"- id={proj['id']}\n"
+                    f"- name={proj['name']}\n"
+                    f"- type={proj['type']}\n"
+                    f"- status={proj['status']}\n"
+                    f"- created_at={proj['created_at']}\n"
+                    f"- updated_at={proj['updated_at']}\n"
+                )
+            except Exception:
+                # Фолбек на випадок, якщо структура інша — хоч щось осмислене показати.
+                return f"Поточний проєкт: {proj}"
 
         if lower in ("проєкти", "список проєктів", "проекты"):
-            projects = list_projects()
+            projects = get_projects()
             if not projects:
                 return "У БД ще немає жодного проєкту."
             lines = ["Список проєктів:"]
@@ -86,7 +134,8 @@ class HeadAgent:
         # --- 3. Письменницькі команди (простий варіант-плайсхолдер) ---
         if lower in ("письменницькі проекти", "письменницькі проєкти"):
             # Поки просто показуємо всі проєкти типу 'writing'
-            projects = list_projects(project_type="writing")
+            all_projects = get_projects()
+            projects = [p for p in all_projects if p.get("type") == "writing"]
             if not projects:
                 return "Письменницьких проєктів поки немає."
             lines = ["Письменницькі проєкти:"]
@@ -94,8 +143,14 @@ class HeadAgent:
                 lines.append(f"- id={p['id']} | name={p['name']} | status={p['status']}")
             return "\n".join(lines)
 
-        # --- 4. За замовчуванням: це звичайна задача → Supervisor ---
-        # Тут ми поводимось як app.py --task "...".
-        context: Dict[str, Any] = {}
-        result = self.supervisor.run(clean, memory, context, auto=auto)
-        return result
+        # --- 4. За замовчуванням: це звичайна "людська" задача → Qwen як голова ---
+        #
+        # На цьому етапі:
+        # - спеціальні службові команди ("проєкт", "проєкти", "аналіз помилок", "письменницькі проєкти")
+        #   обробляються вище чистим Python-кодом;
+        # - усі інші запити йдуть у ask_llm(), тобто до Qwen як мозку HeadAgent-а.
+        #
+        # Поки що ми не просимо Qwen самостійно викликати Supervisor чи інші агенти —
+        # це буде окремий етап (інструменти / BossAgent).
+        reply = self.ask_llm(clean)
+        return reply
