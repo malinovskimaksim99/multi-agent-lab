@@ -14,7 +14,7 @@ import subprocess
 import sys
 from typing import Optional
 
-from db import get_projects, get_book_outline
+from db import get_projects, get_book_outline, get_writing_projects
 
 
 app = FastAPI(title="multi-agent-lab API")
@@ -315,9 +315,7 @@ async def root() -> str:
             </div>
         </div>
         <script>
-            // Тимчасово фіксований id тестової книги для панелі структури.
-            // Пізніше зробимо вибір книги за поточним проєктом.
-            const OUTLINE_BOOK_ID = 2;
+
 
             const taskEl = document.getElementById('task');
             const autoEl = document.getElementById('auto');
@@ -439,17 +437,16 @@ async def root() -> str:
                     return;
                 }
 
-                // Тимчасово: використовуємо фіксований OUTLINE_BOOK_ID.
-                // Пізніше підʼєднаємо справжній пошук книги за проєктом.
-                loadOutline(OUTLINE_BOOK_ID);
+                // Тепер запитуємо outline за project_id, без жорсткого book_id.
+                loadOutlineForProject(currentProjectId);
             }
 
-            async function loadOutline(bookId) {
+            async function loadOutlineForProject(projectId) {
                 if (!structureBody) return;
                 structureBody.innerHTML = '<p>Завантаження структури…</p>';
 
                 try {
-                    const resp = await fetch('/writing/outline?book_id=' + bookId);
+                    const resp = await fetch('/writing/outline?project_id=' + projectId);
                     if (!resp.ok) {
                         throw new Error('HTTP ' + resp.status);
                     }
@@ -639,11 +636,30 @@ async def list_projects() -> dict:
 
 
 @app.get("/writing/outline")
-async def writing_outline(book_id: int):
+async def writing_outline(project_id: int | None = None, book_id: int | None = None):
     """
-    Повертає структуру книги (outline) за book_id.
-    Використовується UI для відображення книги: заголовок, глави, сцени.
+    Повертає структуру книги (outline).
+
+    Можна передати або book_id напряму, або project_id письменницького проєкту.
+    Якщо переданий project_id, шукаємо перший відповідний writing‑проєкт і
+    використовуємо його id як book_id.
     """
+    if book_id is None and project_id is None:
+        raise HTTPException(status_code=400, detail="Specify project_id or book_id")
+
+    # Якщо не передали book_id, але є project_id — шукаємо книгу для цього проєкту.
+    if book_id is None and project_id is not None:
+        writing_projects = get_writing_projects()
+        candidates = [p for p in writing_projects if p.get("project_id") == project_id]
+        if not candidates:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No writing project (book) found for project_id={project_id}",
+            )
+        # Беремо перший як основну книгу для цього проєкту.
+        book_id = candidates[0]["id"]
+
+    assert book_id is not None
     try:
         outline = get_book_outline(book_id)
     except ValueError as exc:
