@@ -1,7 +1,7 @@
 # agents/head.py
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .supervisor import Supervisor
 
@@ -10,6 +10,8 @@ from db import (
     get_current_project,
     set_current_project,
     get_recent_errors,  # ми вже додавали це раніше
+    add_head_note,
+    get_head_notes,
 )
 
 from .head_profile import build_head_system_prompt
@@ -34,7 +36,7 @@ class HeadAgent:
 
         Поки що:
         - використовуємо системний промпт з head_profile,
-        - звертаємось до моделі qwen3-vl:8b,
+        - звертаємось до моделі qwen3:8b,
         - не обмежуємо max_tokens (щоб не обрізати відповідь штучно),
         - якщо щось пішло не так — повертаємо зрозуміле повідомлення про помилку.
         """
@@ -42,7 +44,7 @@ class HeadAgent:
             reply = call_head_llm(
                 user_text=user_text,
                 system_prompt=self.system_prompt,
-                model="qwen3-vl:8b",
+                model="qwen3:8b",
                 temperature=0.2,
                 # max_tokens не задаємо: довжину контролює сама модель,
                 # а лаконічність ми задаємо в HEAD_SYSTEM_PROMPT.
@@ -58,6 +60,94 @@ class HeadAgent:
             return "[HeadAgent/Qwen повернув лише порожній рядок]"
 
         return reply
+
+    def _get_current_project_name(self) -> Optional[str]:
+        """Повертає назву поточного проєкту (якщо є), інакше None."""
+        try:
+            proj = get_current_project()
+        except Exception:
+            return None
+
+        if not proj:
+            return None
+
+        # Іноді це може бути вже готовий текст/рядок.
+        if isinstance(proj, str):
+            # Якщо там просто "Розробка" — ок. Якщо це довгий опис — все одно краще
+            # нічого не логувати, ніж логувати в дивну назву.
+            s = proj.strip()
+            if 1 <= len(s) <= 80 and "\n" not in s:
+                return s
+            return None
+
+        if isinstance(proj, dict):
+            name = proj.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+
+        return None
+
+    def _log_head_note(self, user_text: str, reply: str) -> None:
+        """Записує короткий лог взаємодії HeadAgent-а в head_notes.
+
+        Важливо: не ламаємо чат, якщо БД/схема/параметри не співпали — просто мовчки ігноруємо.
+        """
+        project_name = self._get_current_project_name()
+        if not project_name:
+            return
+
+        note_text = f"USER: {user_text.strip()}\n\nHEAD: {reply.strip()}"
+
+        # Прагнемо бути сумісними з різними сигнатурами add_head_note(...)
+        try:
+            add_head_note(
+                project_name,
+                scope="project",
+                note_type="interaction",
+                note=note_text,
+                importance=1,
+                tags="head,interaction",
+                source="head_agent",
+                author="head",
+            )
+            return
+        except TypeError:
+            # Можливо, функція приймає інші імена параметрів/менше аргументів.
+            pass
+        except Exception:
+            return
+
+        try:
+            # Мінімальний фолбек: тільки те, що майже напевно є.
+            add_head_note(project_name, note_text)
+        except Exception:
+            return
+
+    def _format_head_notes(self, notes: Any) -> str:
+        """Гарне форматування списку нотаток для відповіді в чаті."""
+        if not notes:
+            return "Нотаток HeadAgent-а поки немає."
+
+        # Очікуємо list[dict], але робимо фолбеки
+        if not isinstance(notes, list):
+            return f"Нотатки: {notes}"
+
+        lines = ["Останні head нотатки:"]
+        for i, n in enumerate(notes, start=1):
+            if isinstance(n, dict):
+                created = n.get("created_at") or n.get("updated_at") or ""
+                note_type = n.get("note_type") or ""
+                note = (n.get("note") or "").strip()
+                if len(note) > 400:
+                    note = note[:400].rstrip() + "…"
+                meta = " | ".join([p for p in [created, note_type] if p])
+                if meta:
+                    lines.append(f"{i}) [{meta}]\n{note}")
+                else:
+                    lines.append(f"{i}) {note}")
+            else:
+                lines.append(f"{i}) {n}")
+        return "\n\n".join(lines)
 
     def handle(self, text: str, memory: Any, *, auto: bool = True) -> str:
         """
@@ -143,6 +233,30 @@ class HeadAgent:
                 lines.append(f"- id={p['id']} | name={p['name']} | status={p['status']}")
             return "\n".join(lines)
 
+        # --- 4. Head нотатки ---
+        if lower in (
+            "head нотатки",
+            "покажи head нотатки",
+            "покажи нотатки head",
+            "show head notes",
+        ):
+            project_name = self._get_current_project_name()
+            if not project_name:
+                return "Немає активного проєкту, тому і head нотатки показати не можу."
+
+            try:
+                notes = get_head_notes(project_name=project_name, limit=5)
+            except TypeError:
+                # Фолбек для іншої сигнатури
+                try:
+                    notes = get_head_notes(project_name, 5)
+                except Exception as e:
+                    return f"Не вдалося прочитати head нотатки: {e}"
+            except Exception as e:
+                return f"Не вдалося прочитати head нотатки: {e}"
+
+            return self._format_head_notes(notes)
+
         # --- 4. За замовчуванням: це звичайна "людська" задача → Qwen як голова ---
         #
         # На цьому етапі:
@@ -153,4 +267,5 @@ class HeadAgent:
         # Поки що ми не просимо Qwen самостійно викликати Supervisor чи інші агенти —
         # це буде окремий етап (інструменти / BossAgent).
         reply = self.ask_llm(clean)
+        self._log_head_note(clean, reply)
         return reply
