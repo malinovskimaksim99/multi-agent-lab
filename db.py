@@ -198,6 +198,52 @@ def init_db() -> None:
         """
     )
 
+    # Таблиця нотаток HeadAgent'а (пам'ять по проєктах/книгах/сценах)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS head_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER,
+            book_id INTEGER,
+            chapter_id INTEGER,
+            scene_id INTEGER,
+
+            scope TEXT,
+            note_type TEXT,
+
+            -- Вміст нотатки
+            note TEXT NOT NULL,
+
+            -- Важливість 1–5
+            importance INTEGER NOT NULL DEFAULT 1,
+
+            -- Теги (через кому)
+            tags TEXT,
+
+            -- Джерело / автор
+            source TEXT,
+            author TEXT,
+
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
+    # Міграція для head_notes: додаємо нові колонки, якщо їх ще немає
+    cur.execute("PRAGMA table_info(head_notes)")
+    hn_columns = [row[1] for row in cur.fetchall()]
+    if "importance" not in hn_columns:
+        cur.execute(
+            "ALTER TABLE head_notes ADD COLUMN importance INTEGER NOT NULL DEFAULT 1"
+        )
+    if "tags" not in hn_columns:
+        cur.execute("ALTER TABLE head_notes ADD COLUMN tags TEXT")
+    if "source" not in hn_columns:
+        cur.execute("ALTER TABLE head_notes ADD COLUMN source TEXT")
+    if "author" not in hn_columns:
+        cur.execute("ALTER TABLE head_notes ADD COLUMN author TEXT")
+
     # Таблиця налаштувань проєктів (key/value, як для конфігів агентів)
     cur.execute(
         """
@@ -876,6 +922,25 @@ def get_projects() -> List[Dict[str, Any]]:
     return projects
 
 
+# ----------------- HeadAgent helpers -----------------
+
+from typing import Any, Dict, List, Optional
+
+def get_project_id_by_name(name: str) -> Optional[int]:
+    """Повертає id проєкту за його назвою або None, якщо не знайдено."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id FROM projects WHERE name = ?",
+        (name,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return int(row["id"])
+
+
 def get_current_project() -> str:
     """
     Повертає назву поточного проєкту. Якщо нічого не налаштовано – гарантує, що обрано існуючий проєкт (через ensure_default_project).
@@ -893,6 +958,159 @@ def get_current_project() -> str:
         return str(row["value"])
     # Якщо щось пішло не так – підстрахуємось
     return ensure_default_project()
+def add_head_note(
+    project_name: str,
+    note: str,
+    scope: str = "project",
+    note_type: str = "general",
+    importance: int = 1,
+    tags: Optional[str] = None,
+    source: str = "head",
+    author: str = "head",
+    book_id: Optional[int] = None,
+    chapter_id: Optional[int] = None,
+    scene_id: Optional[int] = None,
+) -> int:
+    """Додає нотатку HeadAgent'а в таблицю head_notes для вказаного проєкту.
+
+    project_name перетворюємо в project_id через таблицю projects.
+    Повертає id створеної нотатки.
+    """
+    project_id = get_project_id_by_name(project_name)
+    if project_id is None:
+        # Якщо проєкт не знайдено, створимо його як generic і візьмемо id
+        create_project(project_name, type_="generic")
+        project_id = get_project_id_by_name(project_name)
+
+    conn = get_connection()
+    cur = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+
+    cur.execute(
+        """
+        INSERT INTO head_notes (
+            project_id,
+            book_id,
+            chapter_id,
+            scene_id,
+            scope,
+            note_type,
+            note,
+            importance,
+            tags,
+            source,
+            author,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            project_id,
+            book_id,
+            chapter_id,
+            scene_id,
+            scope,
+            note_type,
+            note,
+            importance,
+            tags,
+            source,
+            author,
+            now,
+            now,
+        ),
+    )
+
+    conn.commit()
+    note_id = cur.lastrowid
+    conn.close()
+    return note_id
+
+
+def get_head_notes(
+    project_name: Optional[str] = None,
+    scope: Optional[str] = None,
+    min_importance: int = 1,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Повертає список нотаток HeadAgent'а.
+
+    Можна фільтрувати за назвою проєкту (project_name) і scope ("global", "project", "book", "chapter", "scene").
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    params: List[Any] = []
+    where_clauses: List[str] = []
+
+    # Мінімальна важливість
+    where_clauses.append("importance >= ?")
+    params.append(min_importance)
+
+    if project_name is not None:
+        project_id = get_project_id_by_name(project_name)
+        if project_id is None:
+            conn.close()
+            return []
+        where_clauses.append("project_id = ?")
+        params.append(project_id)
+
+    if scope is not None:
+        where_clauses.append("scope = ?")
+        params.append(scope)
+
+    base_query = """
+        SELECT
+            id,
+            project_id,
+            book_id,
+            chapter_id,
+            scene_id,
+            scope,
+            note_type,
+            note,
+            importance,
+            tags,
+            source,
+            author,
+            created_at,
+            updated_at
+        FROM head_notes
+    """
+
+    if where_clauses:
+        base_query += " WHERE " + " AND ".join(where_clauses)
+
+    base_query += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+
+    cur.execute(base_query, tuple(params))
+    rows = cur.fetchall()
+    conn.close()
+
+    notes: List[Dict[str, Any]] = []
+    for r in rows:
+        notes.append(
+            {
+                "id": r["id"],
+                "project_id": r["project_id"],
+                "book_id": r["book_id"],
+                "chapter_id": r["chapter_id"],
+                "scene_id": r["scene_id"],
+                "scope": r["scope"],
+                "note_type": r["note_type"],
+                "note": r["note"],
+                "importance": r["importance"],
+                "tags": r["tags"],
+                "source": r["source"],
+                "author": r["author"],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            }
+        )
+
+    return notes
 
 
 def set_current_project(name: str) -> None:
