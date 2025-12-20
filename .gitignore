@@ -18,9 +18,10 @@ ENV/
 .env
 
 # Runtime files for this project
+logs.jsonl
 memory/memory.json
-logs.jsonl
-# runtime artifacts
-logs.jsonl
 eval/latest_eval.json
-memory/memory.json
+
+# Local SQLite DB (runtime/state)
+runs.db
+runs.db-*
