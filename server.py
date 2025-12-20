@@ -10,31 +10,70 @@ Minimal HTTP API wrapper around multi-agent-lab.
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-import subprocess
-import sys
-from typing import Optional
+from typing import Optional, Any
 
+from agents.head import HeadAgent
 from db import get_projects, get_book_outline, get_writing_projects, get_current_project
+
 
 
 app = FastAPI(title="multi-agent-lab API")
 
 
-class ChatRequest(BaseModel):
-    """Запит на запуск одного завдання multi-agent-lab."""
+def _load_memory() -> Any:
+    """Намагаємось завантажити пам'ять так само, як у CLI.
 
-    task: str
+    Робимо максимально толерантно до різних реалізацій memory/.
+    """
+    # 1) Спроба імпортувати Memory з пакету memory
+    try:
+        from memory import Memory  # type: ignore
+
+        # Підтримуємо різні варіанти API
+        if hasattr(Memory, "load"):
+            return Memory.load()  # type: ignore
+        if hasattr(Memory, "load_or_create"):
+            return Memory.load_or_create()  # type: ignore
+        return Memory()  # type: ignore
+    except Exception:
+        pass
+
+    # 2) Фолбек — простий об'єкт з flags
+    class SimpleMemory:
+        def __init__(self) -> None:
+            self.flags: dict[str, Any] = {}
+
+        def get_flag(self, name: str, default: Any = None) -> Any:
+            return self.flags.get(name, default)
+
+        def set_flag(self, name: str, value: Any) -> None:
+            self.flags[name] = value
+
+    return SimpleMemory()
+
+
+# Глобальні екземпляри для API (щоб пам'ять жила між запитами)
+MEMORY = _load_memory()
+HEAD = HeadAgent()
+
+
+class ChatRequest(BaseModel):
+    """Запит для /chat.
+
+    Підтримуємо сумісність: можна надіслати `task` або `text`.
+    """
+
+    task: Optional[str] = None
+    text: Optional[str] = None
     auto: bool = True
 
 
 class ChatResponse(BaseModel):
-    """Відповідь із результатом запуску app.py."""
+    """Відповідь HeadAgent-а."""
 
     task: str
     auto: bool
-    stdout: str
-    stderr: str
-    return_code: int
+    reply: str
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -285,7 +324,7 @@ async def root() -> str:
         <div class="main">
             <div class="header">
                 <div class="header-text">
-                    Простий чат з /chat (app.py). Далі будемо розвивати до повного робочого середовища.
+                    Простий чат з /chat (HeadAgent). Далі будемо розвивати до повного робочого середовища.
                 </div>
                 <button id="toggle-structure" class="btn-secondary">Структура ▼</button>
             </div>
@@ -545,14 +584,14 @@ async def root() -> str:
                         throw new Error('HTTP ' + resp.status);
                     }
                     const data = await resp.json();
-                    const text = data.stdout || '(порожній stdout)';
-                    appendMessage('lab', text);
-                    statusEl.textContent = 'Готово (код ' + data.return_code + ')';
+                    const text = data.reply || '(порожня відповідь)';
+                    appendMessage('HeadAgent', text);
+                    statusEl.textContent = 'Готово';
                 } catch (err) {
                     console.error(err);
                     statusEl.textContent = 'Помилка: ' + err.message;
                     statusEl.classList.add('error');
-                    appendMessage('lab', 'Помилка при виклику /chat: ' + err.message);
+                    appendMessage('HeadAgent', 'Помилка при виклику /chat: ' + err.message);
                 } finally {
                     sendBtn.disabled = false;
                     taskEl.focus();
@@ -595,34 +634,24 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
-    """
-    Запустити одне завдання через `app.py` як через CLI.
+    """Чат-ендпоінт, який відповідає через HeadAgent.
 
-    Ми спеціально не імпортуємо Supervisor / HeadAgent,
-    а просто викликаємо існуючий інтерфейс командного рядка:
-        python app.py --task "..." --auto
+    Приймає `task` або `text`.
     """
 
-    # Формуємо команду для підпроцесу
-    cmd = [sys.executable, "app.py", "--task", req.task]
-    if req.auto:
-        cmd.append("--auto")
+    task = (req.task or req.text or "").strip()
+    if not task:
+        raise HTTPException(status_code=422, detail="Field required: task (or text)")
 
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        reply = HEAD.handle(task, MEMORY)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"HeadAgent error: {exc}")
 
-    return ChatResponse(
-        task=req.task,
-        auto=req.auto,
-        stdout=proc.stdout,
-        stderr=proc.stderr,
-        return_code=proc.returncode,
-    )
+    return ChatResponse(task=task, auto=req.auto, reply=reply)
 
 
 
