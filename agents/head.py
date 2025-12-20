@@ -1,6 +1,11 @@
 # agents/head.py
 from __future__ import annotations
 
+import os
+import inspect
+import json
+import subprocess
+
 from typing import Any, Dict, Optional
 
 from .supervisor import Supervisor
@@ -149,6 +154,313 @@ class HeadAgent:
                 lines.append(f"{i}) {n}")
         return "\n\n".join(lines)
 
+    def _is_pytest_request(self, user_text: str) -> bool:
+        """Чи просить користувач запустити pytest."""
+        t = (user_text or "").strip().lower()
+        if not t:
+            return False
+
+        # Нормалізуємо початок (на випадок лапок/тире/пунктуації перед словом)
+        norm = t.lstrip(" \t\n\r\"'`“”«»—–-\u00a0")
+
+        # Підтримуємо найпоширеніші формулювання
+        if "pytest" in norm and ("запусти" in norm or "run" in norm or norm.startswith("pytest")):
+            return True
+
+        return False
+
+    def _truncate(self, s: str, limit: int = 6000) -> str:
+        s = s or ""
+        if len(s) <= limit:
+            return s
+        return s[:limit].rstrip() + "…"
+
+    def _run_pytest(self) -> str:
+        """Запускає pytest у поточному робочому каталозі репо."""
+        # Найбільш сумісний виклик (не залежить від того, чи є pytest як окремий executable в PATH)
+        cmd = ["python", "-m", "pytest", "-q"]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            return "[pytest] Timeout (300s): тести виконуються занадто довго або зависли."
+        except Exception as e:
+            return f"[pytest] Не вдалося запустити pytest: {e}"
+
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+
+        parts = ["[pytest] finished", f"return_code={proc.returncode}"]
+        if out:
+            parts.append("\n[stdout]\n" + self._truncate(out))
+        if err:
+            parts.append("\n[stderr]\n" + self._truncate(err))
+
+        return "\n".join(parts)
+
+    def _should_delegate(self, user_text: str) -> bool:
+        """Евристика: коли варто делегувати задачу Supervisor-у.
+
+        Ми делегуємо, коли запит схожий на "зроби дію в системі" (код/запуск/тести/гіт/аналіз/збірка).
+        Не делегуємо для коротких розмовних відповідей.
+        """
+        debug = os.getenv("HEAD_DEBUG_DELEGATION", "").strip() == "1"
+
+        def dbg(msg: str) -> None:
+            if debug:
+                print(f"[head:delegate?] {msg}")
+
+        t = (user_text or "").strip()
+        if not t:
+            dbg("empty -> False")
+            return False
+
+        lower = t.lower()
+        # Нормалізуємо початок (на випадок лапок/тире/пунктуації перед словом)
+        norm = lower.lstrip(" \t\n\r\"'`“”«»—–-\u00a0")
+        dbg(f"raw='{lower[:80]}' norm='{norm[:80]}'")
+
+        # Явний opt-out
+        if any(p in norm for p in ("не делегуй", "без делегування", "тільки поясни", "тільки відповідь")):
+            dbg("opt-out phrase -> False")
+            return False
+
+        # Дуже короткі фрази зазвичай не потребують пайплайна
+        if len(lower) <= 12 and lower in ("ок", "ok", "привіт", "hello", "дякую", "thanks"):
+            dbg("very short greeting -> False")
+            return False
+
+        # Розмовні/"скажи"-запити зазвичай не потребують пайплайна Supervisor-а.
+        conversational_prefixes = (
+            "скажи",
+            "скажіть",
+            "say",
+            "розкажи",
+            "розкажіть",
+            "поясни",
+            "поясніть",
+            "explain",
+            "що таке",
+            "що це",
+            "what is",
+        )
+        if norm.startswith(conversational_prefixes):
+            dbg("conversational prefix -> False")
+            return False
+
+        # Якщо користувач просить саме виконання / запуск / перевірку / зміни коду
+        keywords = (
+            # запуск/дія
+            "запусти",
+            "виконай",
+            "зроби",
+            "згенеруй",
+            "створи",
+            "перевір",
+            "протестуй",
+            "тест",
+            "збірка",
+            "build",
+            "run",
+            "execute",
+            "pytest",
+            # код/правки
+            "код",
+            "напиши код",
+            "виправ",
+            "пофіксь",
+            "пофікси",
+            "рефактор",
+            "перепиши",
+            "пул реквест",
+            "pull request",
+            # git
+            "git ",
+            "коміт",
+            "commit",
+            "push",
+            "branch",
+            "merge",
+            # системні/cli
+            "pip ",
+            "python ",
+            "curl ",
+            "docker",
+            # аналітика/лог/помилки
+            "помилка",
+            "errors",
+            "traceback",
+            "лог",
+            "logs",
+            "runs",
+            "eval",
+            "датасет",
+            "dataset",
+        )
+
+        if any(k in norm for k in keywords):
+            dbg("keyword hit -> True")
+            return True
+
+        # Якщо є явні маркери командного рядка
+        if "```" in norm or norm.startswith("$"):
+            dbg("command marker -> True")
+            return True
+
+        dbg("no rule matched -> False")
+        return False
+
+    def _format_supervisor_output(self, out: Any) -> str:
+        """Нормалізуємо результат Supervisor-а до рядка."""
+        if out is None:
+            return ""
+
+        if isinstance(out, str):
+            return out.strip()
+
+        # Часто це може бути dict з stdout/stderr/return_code або вкладеним результатом
+        if isinstance(out, dict):
+            # Найчастіші поля
+            stdout = (
+                out.get("stdout")
+                or out.get("output")
+                or out.get("text")
+                or out.get("reply")
+                or out.get("content")
+                or out.get("result")
+                or out.get("response")
+                or out.get("final")
+            )
+            stderr = out.get("stderr")
+            rc = out.get("return_code")
+
+            # Інколи результат лежить всередині іншого dict
+            for nested_key in ("data", "payload", "run", "meta", "message"):
+                nested = out.get(nested_key)
+                if isinstance(nested, dict):
+                    stdout = stdout or (
+                        nested.get("stdout")
+                        or nested.get("output")
+                        or nested.get("text")
+                        or nested.get("reply")
+                        or nested.get("content")
+                        or nested.get("result")
+                        or nested.get("response")
+                        or nested.get("final")
+                    )
+                    stderr = stderr or nested.get("stderr")
+                    if rc is None and nested.get("return_code") is not None:
+                        rc = nested.get("return_code")
+
+            parts: list[str] = []
+
+            # Якщо є хоча б трохи контенту — повертаємо його
+            if stdout:
+                parts.append(str(stdout).strip())
+
+            # Якщо контенту немає, але є технічні метадані — покажемо їх (краще ніж порожньо)
+            if not parts:
+                solver = out.get("solver") or out.get("solver_name")
+                tags = out.get("tags")
+                if solver or tags:
+                    meta_bits = []
+                    if solver:
+                        meta_bits.append(f"solver={solver}")
+                    if tags:
+                        meta_bits.append(f"tags={tags}")
+                    parts.append("[supervisor result: " + ", ".join(meta_bits) + "]")
+
+            if stderr:
+                parts.append("\n[stderr]\n" + str(stderr).strip())
+            if rc is not None:
+                parts.append(f"\n[return_code={rc}]")
+
+            return "\n".join([p for p in parts if p and p.strip()])
+
+        # Фолбек
+        return str(out).strip()
+
+    def _delegate_to_supervisor(self, task: str, memory: Any, *, auto: bool = True) -> Optional[str]:
+        """Спроба виконати задачу через Supervisor.
+
+        Реальний Supervisor у цьому проекті має метод `run`. Ми викликаємо його
+        і підбираємо аргументи через inspect.signature(), щоб не ламатися при різних сигнатурах.
+
+        Повертає текст відповіді або None, якщо делегування не вдалося.
+        """
+        debug = os.getenv("HEAD_DEBUG_DELEGATION", "").strip() == "1"
+
+        def dbg(msg: str) -> None:
+            if debug:
+                print(f"[head:delegate] {msg}")
+
+        fn = getattr(self.supervisor, "run", None)
+        if not callable(fn):
+            dbg("Supervisor.run is missing -> None")
+            return None
+
+        # Підбираємо kwargs під реальну сигнатуру
+        kwargs: Dict[str, Any] = {}
+        try:
+            sig = inspect.signature(fn)
+            param_names = set(sig.parameters.keys())
+        except Exception as e:
+            dbg(f"inspect.signature failed: {e}")
+            param_names = set()
+
+        if "memory" in param_names:
+            kwargs["memory"] = memory
+
+        # У більшості реалізацій Supervisor вже налаштований через auto_solver/auto_team,
+        # але якщо у run() є прапор auto — передамо його.
+        if "auto" in param_names:
+            kwargs["auto"] = auto
+
+        dbg(f"calling Supervisor.run(task, {kwargs})")
+
+        out: Any
+        try:
+            out = fn(task, **kwargs)
+        except TypeError as e:
+            dbg(f"TypeError with kwargs: {e}; trying positional fallbacks")
+            # Фолбеки на інші сигнатури
+            try:
+                out = fn(task, memory)
+            except TypeError as e2:
+                dbg(f"TypeError with (task, memory): {e2}; trying (task)")
+                try:
+                    out = fn(task)
+                except Exception as e3:
+                    dbg(f"Supervisor.run(task) failed: {e3}")
+                    return None
+            except Exception as e2:
+                dbg(f"Supervisor.run(task, memory) failed: {e2}")
+                return None
+        except Exception as e:
+            dbg(f"Supervisor.run failed: {e}")
+            return None
+
+        text = self._format_supervisor_output(out)
+        if not text:
+            if isinstance(out, dict):
+                try:
+                    dumped = json.dumps(out, ensure_ascii=False)
+                except Exception:
+                    dumped = repr(out)
+                if len(dumped) > 600:
+                    dumped = dumped[:600] + "…"
+                dbg(f"Supervisor.run dict produced empty text; keys={list(out.keys())} dump={dumped}")
+            else:
+                dbg(f"Supervisor.run returned empty/falsey output: {type(out)}")
+            return None
+
+        dbg(f"delegation ok; len={len(text)}")
+        return text
+
     def handle(self, text: str, memory: Any, *, auto: bool = True) -> str:
         """
         Основна точка входу.
@@ -191,14 +503,10 @@ class HeadAgent:
                 return "У БД ще немає жодного проєкту."
             lines = ["Список проєктів:"]
             for p in projects:
-                lines.append(
-                    f"- id={p['id']} | name={p['name']} | type={p['type']} | status={p['status']}"
-                )
+                lines.append(f"- id={p['id']} | name={p['name']} | type={p['type']} | status={p['status']}")
             return "\n".join(lines)
 
-        if lower.startswith("переключись на проєкт") or lower.startswith(
-            "переключись на проект"
-        ):
+        if lower.startswith("переключись на проєкт") or lower.startswith("переключись на проект"):
             # очікуємо щось типу: "переключись на проєкт Розробка"
             parts = clean.split(" ", 3)
             if len(parts) < 4:
@@ -216,9 +524,7 @@ class HeadAgent:
                 return "У БД ще немає збережених помилок."
             lines = ["Останні помилки:"]
             for e in errors:
-                lines.append(
-                    f"[run_id={e['run_id']}] {e['error_type']}: {e['error_message']}"
-                )
+                lines.append(f"[run_id={e['run_id']}] {e['error_type']}: {e['error_message']}")
             return "\n".join(lines)
 
         # --- 3. Письменницькі команди (простий варіант-плайсхолдер) ---
@@ -257,15 +563,23 @@ class HeadAgent:
 
             return self._format_head_notes(notes)
 
-        # --- 4. За замовчуванням: це звичайна "людська" задача → Qwen як голова ---
+        # --- 5. За замовчуванням: це звичайна "людська" задача → Qwen як голова ---
         #
-        # На цьому етапі:
-        # - спеціальні службові команди ("проєкт", "проєкти", "аналіз помилок", "письменницькі проєкти")
-        #   обробляються вище чистим Python-кодом;
-        # - усі інші запити йдуть у ask_llm(), тобто до Qwen як мозку HeadAgent-а.
-        #
-        # Поки що ми не просимо Qwen самостійно викликати Supervisor чи інші агенти —
-        # це буде окремий етап (інструменти / BossAgent).
+        # HeadAgent може АВТОМАТИЧНО делегувати деякі задачі Supervisor-у за простою евристикою.
+        # --- 5a. Конкретні "дієві" команди, які краще виконати напряму ---
+        if auto and self._is_pytest_request(clean):
+            result = self._run_pytest()
+            self._log_head_note(clean, result)
+            return result
+
+        # --- 5b. Загальна авто-делегація Supervisor-у ---
+        if auto and self._should_delegate(clean):
+            delegated = self._delegate_to_supervisor(clean, memory, auto=auto)
+            if delegated:
+                # Логуємо взаємодію так само, як і звичайну відповідь
+                self._log_head_note(clean, delegated)
+                return delegated
+
         reply = self.ask_llm(clean)
         self._log_head_note(clean, reply)
         return reply
