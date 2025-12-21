@@ -33,7 +33,6 @@ class HeadAgent:
         self.supervisor = Supervisor()
         # Паспорт / системний промпт для головного агента
         self.system_prompt = build_head_system_prompt()
-        self.use_ollama_head = True  # цей прапор поки не використовується, але буде корисний далі
 
     def ask_llm(self, user_text: str) -> str:
         """
@@ -567,7 +566,7 @@ class HeadAgent:
 
             return self._format_head_notes(notes)
 
-        # --- 5. За замовчуванням: це звичайна "людська" задача → Qwen як голова ---
+        # --- 5. За замовчуванням: це звичайна "людська" задача → LLM як голова ---
         #
         # HeadAgent може АВТОМАТИЧНО делегувати деякі задачі Supervisor-у за простою евристикою.
         # --- 5a. Конкретні "дієві" команди, які краще виконати напряму ---
