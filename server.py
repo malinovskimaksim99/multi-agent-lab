@@ -13,7 +13,15 @@ from pydantic import BaseModel
 from typing import Optional, Any
 
 from agents.head import HeadAgent
-from db import get_projects, get_book_outline, get_writing_projects, get_current_project, bootstrap_db
+from db import (
+    get_projects,
+    get_book_outline,
+    get_writing_projects,
+    get_current_project,
+    bootstrap_db,
+    get_llm_config,
+    set_project_setting,
+)
 
 
 
@@ -79,6 +87,14 @@ class ChatResponse(BaseModel):
     task: str
     auto: bool
     reply: str
+
+
+# --- LLMConfigUpdate model ---
+
+class LLMConfigUpdate(BaseModel):
+    base_url: Optional[str] = None
+    head_model: Optional[str] = None
+    writer_model: Optional[str] = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -681,6 +697,36 @@ async def current_project() -> dict:
     if not project:
         raise HTTPException(status_code=404, detail="Current project not found")
     return {"project": project}
+
+
+# --- LLM config endpoints for current project ---
+
+@app.get("/projects/current/llm_config")
+async def current_project_llm_config() -> dict:
+    """Повертає LLM-конфіг для поточного проєкту."""
+    project = get_current_project()
+    if not project:
+        raise HTTPException(status_code=404, detail="Current project not found")
+    cfg = get_llm_config(project)
+    return {"project": project, "llm_config": cfg}
+
+
+@app.post("/projects/current/llm_config")
+async def update_current_project_llm_config(update: LLMConfigUpdate) -> dict:
+    """Оновлює LLM-конфіг для поточного проєкту (dev endpoint)."""
+    project = get_current_project()
+    if not project:
+        raise HTTPException(status_code=404, detail="Current project not found")
+
+    if update.base_url is not None:
+        set_project_setting(project, "llm.base_url", update.base_url)
+    if update.head_model is not None:
+        set_project_setting(project, "llm.head_model", update.head_model)
+    if update.writer_model is not None:
+        set_project_setting(project, "llm.writer_model", update.writer_model)
+
+    cfg = get_llm_config(project)
+    return {"project": project, "llm_config": cfg}
 
 
 @app.get("/writing/outline")
