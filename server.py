@@ -648,80 +648,90 @@ async def root() -> HTMLResponse:
                 devOutput.textContent = text || '';
             }
 
-            async function loadDevStatus() {
+            async function devRunTool(name, args) {
                 try {
-                    const resp = await fetch('/dev/git/status');
+                    const resp = await fetch('/dev/tools/run', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            name: name,
+                            args: args || {}
+                        })
+                    });
                     if (!resp.ok) {
-                        throw new Error('HTTP ' + resp.status);
+                        try {
+                            const data = await resp.json();
+                            const msg = (data && (data.error || data.detail)) || ('HTTP ' + resp.status);
+                            return { ok: false, error: msg };
+                        } catch (e) {
+                            try {
+                                const text = await resp.text();
+                                return { ok: false, error: text || ('HTTP ' + resp.status) };
+                            } catch (_) {
+                                return { ok: false, error: 'HTTP ' + resp.status };
+                            }
+                        }
                     }
                     const data = await resp.json();
-                    setDevOutput(JSON.stringify(data, null, 2));
+                    if (data && data.ok) {
+                        return { ok: true, data: data.data };
+                    }
+                    const msg = (data && (data.error || data.detail)) || 'unknown error';
+                    return { ok: false, error: msg };
                 } catch (err) {
-                    setDevOutput('ERROR: ' + err.message);
+                    return { ok: false, error: err.message };
+                }
+            }
+
+            async function loadDevStatus() {
+                const r = await devRunTool('git_status', {});
+                if (r.ok) {
+                    setDevOutput(JSON.stringify(r.data, null, 2));
+                } else {
+                    setDevOutput('ERROR: ' + r.error);
                 }
             }
 
             async function loadDevDiff() {
-                try {
-                    const resp = await fetch('/dev/git/diff');
-                    if (!resp.ok) {
-                        throw new Error('HTTP ' + resp.status);
+                const r = await devRunTool('git_diff', {});
+                if (r.ok) {
+                    if (r.data && r.data.truncated) {
+                        setDevOutput(r.data.stat || '');
+                    } else {
+                        setDevOutput((r.data && r.data.diff) || '');
                     }
-                    const data = await resp.json();
-                    if (data && data.ok && data.data) {
-                        if (data.data.truncated) {
-                            setDevOutput(data.data.stat || '');
-                        } else {
-                            setDevOutput(data.data.diff || '');
-                        }
-                        return;
-                    }
-                    setDevOutput(JSON.stringify(data, null, 2));
-                } catch (err) {
-                    setDevOutput('ERROR: ' + err.message);
+                } else {
+                    setDevOutput('ERROR: ' + r.error);
                 }
             }
 
             async function loadDevErrors() {
-                try {
-                    const resp = await fetch('/dev/errors?limit=5');
-                    if (!resp.ok) {
-                        throw new Error('HTTP ' + resp.status);
-                    }
-                    const data = await resp.json();
-                    setDevOutput(JSON.stringify(data, null, 2));
-                } catch (err) {
-                    setDevOutput('ERROR: ' + err.message);
+                const r = await devRunTool('recent_errors', { limit: 5 });
+                if (r.ok) {
+                    setDevOutput(JSON.stringify(r.data, null, 2));
+                } else {
+                    setDevOutput('ERROR: ' + r.error);
                 }
             }
 
             async function devSearch() {
                 if (!devSearchInput) return;
                 const query = devSearchInput.value.trim();
-                try {
-                    const resp = await fetch('/dev/search', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({
-                            query: query
-                        })
-                    });
-                    if (!resp.ok) {
-                        throw new Error('HTTP ' + resp.status);
+                if (query.length < 2) {
+                    setDevOutput('Вкажи щонайменше 2 символи для пошуку.');
+                    return;
+                }
+                const r = await devRunTool('repo_search', { query: query, max_matches: 50 });
+                if (r.ok) {
+                    if (!r.data || !r.data.found) {
+                        setDevOutput('нічого не знайдено');
+                    } else {
+                        setDevOutput(r.data.matches || '');
                     }
-                    const data = await resp.json();
-                    if (data && data.ok && data.data) {
-                        const found = !!data.data.found;
-                        const matches = data.data.matches || '';
-                        const header = 'found: ' + found;
-                        setDevOutput(matches ? header + '\\n' + matches : header);
-                        return;
-                    }
-                    setDevOutput(JSON.stringify(data, null, 2));
-                } catch (err) {
-                    setDevOutput('ERROR: ' + err.message);
+                } else {
+                    setDevOutput('ERROR: ' + r.error);
                 }
             }
 
