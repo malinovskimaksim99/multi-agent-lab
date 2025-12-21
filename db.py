@@ -928,6 +928,112 @@ def get_projects() -> List[Dict[str, Any]]:
     return projects
 
 
+def get_project_setting(
+    project_name: str,
+    key: str,
+    default: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Повертає значення налаштування проєкту або default, якщо його немає.
+    """
+    project_id = get_project_id_by_name(project_name)
+    if project_id is None:
+        return default
+
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT value FROM project_settings WHERE project_id = ? AND key = ?",
+        (project_id, key),
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return default
+    return row["value"]
+
+
+def set_project_setting(project_name: str, key: str, value: str) -> None:
+    """
+    Встановлює налаштування для проєкту (upsert).
+    """
+    project_id = get_project_id_by_name(project_name)
+    if project_id is None:
+        return
+
+    conn = get_connection()
+    cur = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+
+    cur.execute("PRAGMA table_info(project_settings)")
+    columns = [row[1] for row in cur.fetchall()]
+    has_updated_at = "updated_at" in columns
+
+    if has_updated_at:
+        cur.execute(
+            """
+            UPDATE project_settings
+            SET value = ?, updated_at = ?
+            WHERE project_id = ? AND key = ?
+            """,
+            (value, now, project_id, key),
+        )
+    else:
+        cur.execute(
+            """
+            UPDATE project_settings
+            SET value = ?
+            WHERE project_id = ? AND key = ?
+            """,
+            (value, project_id, key),
+        )
+
+    if cur.rowcount == 0:
+        if has_updated_at:
+            cur.execute(
+                """
+                INSERT INTO project_settings (project_id, key, value, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (project_id, key, value, now),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO project_settings (project_id, key, value)
+                VALUES (?, ?, ?)
+                """,
+                (project_id, key, value),
+            )
+
+    conn.commit()
+    conn.close()
+
+
+def get_llm_config(project_name: str) -> Dict[str, str]:
+    """
+    Повертає LLM-конфіг для проєкту з дефолтними значеннями.
+    """
+    return {
+        "base_url": get_project_setting(
+            project_name,
+            "llm.base_url",
+            "http://127.0.0.1:1234/v1",
+        ) or "http://127.0.0.1:1234/v1",
+        "head_model": get_project_setting(
+            project_name,
+            "llm.head_model",
+            "qwen2.5-7b-instruct-1m",
+        ) or "qwen2.5-7b-instruct-1m",
+        "writer_model": get_project_setting(
+            project_name,
+            "llm.writer_model",
+            "mamaylm-gemma-2-9b-it",
+        ) or "mamaylm-gemma-2-9b-it",
+    }
+
+
 # ----------------- HeadAgent helpers -----------------
 
 
