@@ -8,9 +8,10 @@ Minimal HTTP API wrapper around multi-agent-lab.
 щоб не лізти у внутрішню реалізацію Supervisor / HeadAgent.
 """
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Any
+import subprocess
 
 from agents.head import HeadAgent
 from db import (
@@ -23,6 +24,7 @@ from db import (
     get_llm_config,
     set_project_setting,
     ensure_writing_project_for_project_id,
+    get_recent_errors,
 )
 
 
@@ -67,6 +69,96 @@ def _load_memory() -> Any:
     return SimpleMemory()
 
 
+def _truncate(text: str, limit: int = 8000) -> str:
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "…"
+
+
+def _run_cmd(cmd: list[str], timeout_s: int) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+    )
+    return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+def _cmd_error(cmd_str: str, code: int, out: str, err: str) -> str:
+    out = _truncate(out.strip())
+    err = _truncate(err.strip())
+    if err:
+        return f"{cmd_str} failed (code={code}): {err}"
+    if out:
+        return f"{cmd_str} failed (code={code}): {out}"
+    return f"{cmd_str} failed (code={code})"
+
+
+def _git_status() -> dict:
+    cmd = ["git", "status", "--porcelain=v1", "-b"]
+    code, out, err = _run_cmd(cmd, timeout_s=20)
+    if code != 0:
+        raise RuntimeError(_cmd_error("git status", code, out, err))
+    return {
+        "stdout": _truncate(out.strip()),
+        "stderr": _truncate(err.strip()),
+    }
+
+
+def _git_diff() -> dict:
+    cmd = ["git", "diff"]
+    code, out, err = _run_cmd(cmd, timeout_s=20)
+    if code != 0:
+        raise RuntimeError(_cmd_error("git diff", code, out, err))
+
+    if len(out) > 8000:
+        stat_code, stat_out, stat_err = _run_cmd(["git", "diff", "--stat"], timeout_s=20)
+        if stat_code != 0:
+            raise RuntimeError(_cmd_error("git diff --stat", stat_code, stat_out, stat_err))
+        return {
+            "truncated": True,
+            "stat": _truncate(stat_out.strip()),
+            "stderr": _truncate(stat_err.strip()),
+        }
+
+    return {
+        "truncated": False,
+        "diff": _truncate(out.strip()),
+        "stderr": _truncate(err.strip()),
+    }
+
+
+def _repo_search(query: str) -> dict:
+    cmd = [
+        "grep",
+        "-R",
+        "--line-number",
+        "--binary-files=without-match",
+        "--exclude-dir=.git",
+        "--exclude-dir=.venv",
+        "-m",
+        "50",
+        "--",
+        query,
+        ".",
+    ]
+    code, out, err = _run_cmd(cmd, timeout_s=20)
+    if code == 1:
+        return {
+            "found": False,
+            "matches": "",
+        }
+    if code != 0:
+        raise RuntimeError(_cmd_error("grep", code, out, err))
+    return {
+        "found": True,
+        "matches": _truncate(out.strip()),
+        "stderr": _truncate(err.strip()),
+    }
+
+
 # Глобальні екземпляри для API (щоб пам'ять жила між запитами)
 MEMORY = _load_memory()
 HEAD = HeadAgent()
@@ -101,6 +193,10 @@ class LLMConfigUpdate(BaseModel):
 
 class CurrentProjectUpdate(BaseModel):
     project: str
+
+
+class SearchRequest(BaseModel):
+    query: str
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -709,6 +805,65 @@ async def health() -> dict:
     """Простий health-check ендпоінт."""
 
     return {"status": "ok"}
+
+
+@app.get("/dev/git/status")
+async def dev_git_status() -> dict:
+    try:
+        data = _git_status()
+        return {"ok": True, "data": data}
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": str(exc)},
+        )
+
+
+@app.get("/dev/git/diff")
+async def dev_git_diff() -> dict:
+    try:
+        data = _git_diff()
+        return {"ok": True, "data": data}
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": str(exc)},
+        )
+
+
+@app.post("/dev/search")
+async def dev_search(req: SearchRequest) -> dict:
+    query = (req.query or "").strip()
+    if len(query) < 2:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "error": "Field required: query"},
+        )
+    try:
+        data = _repo_search(query)
+        return {"ok": True, "data": data}
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": str(exc)},
+        )
+
+
+@app.get("/dev/errors")
+async def dev_errors(limit: int = 10) -> dict:
+    if limit <= 0:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "error": "limit must be > 0"},
+        )
+    try:
+        data = get_recent_errors(limit=limit)
+        return {"ok": True, "data": data}
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": str(exc)},
+        )
 
 
 
