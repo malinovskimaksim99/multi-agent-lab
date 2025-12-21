@@ -9,6 +9,10 @@ import subprocess
 from typing import Any, Dict, Optional
 
 import repo_tools as rt
+try:
+    import tools_allowlist as ta
+except Exception:
+    ta = None  # type: ignore
 
 from .supervisor import Supervisor
 
@@ -514,6 +518,62 @@ class HeadAgent:
         """
         clean = text.strip()
         lower = clean.lower()
+
+        # --- 0. Tools-first allowlist (explicit tool invocation) ---
+        if lower.startswith("tool "):
+            tool_text = clean[5:].strip()
+            if not tool_text:
+                result = "Usage: tool <name> [args]"
+                self._log_head_note(clean, result)
+                return result
+            if ta is None:
+                result = "[tool] error: tools_allowlist not available"
+                self._log_head_note(clean, result)
+                return result
+
+            name, *rest = tool_text.split(" ", 1)
+            args: Dict[str, Any] = {}
+            if rest:
+                rest_str = rest[0].strip()
+                if rest_str:
+                    if rest_str.startswith("{") and rest_str.endswith("}"):
+                        try:
+                            parsed = json.loads(rest_str)
+                            if isinstance(parsed, dict):
+                                args = parsed
+                            else:
+                                result = "Tool args must be a JSON object"
+                                self._log_head_note(clean, result)
+                                return result
+                        except Exception as e:
+                            result = f"Invalid JSON args: {e}"
+                            self._log_head_note(clean, result)
+                            return result
+                    else:
+                        if name == "repo_search":
+                            args = {"query": rest_str}
+                        elif name == "git_diff" and rest_str.isdigit():
+                            args = {"limit": int(rest_str)}
+                        elif name == "recent_errors" and rest_str.isdigit():
+                            args = {"limit": int(rest_str)}
+                        else:
+                            result = "Unsupported tool args format"
+                            self._log_head_note(clean, result)
+                            return result
+
+            try:
+                out = ta.run_tool(name, args)
+                if out.get("ok"):
+                    payload = out.get("data")
+                    dumped = json.dumps(payload, ensure_ascii=False, indent=2)
+                    result = "[tool] ok\n" + self._truncate(dumped)
+                else:
+                    result = "[tool] error: " + str(out.get("error", "unknown error"))
+            except Exception as e:
+                result = "[tool] error: " + str(e)
+
+            self._log_head_note(clean, result)
+            return result
 
         # --- 1. Команди про проєкти ---
         if lower in ("проєкт", "проект", "поточний проєкт"):
