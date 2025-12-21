@@ -18,6 +18,7 @@ except Exception:
     ta = None  # type: ignore
 
 from agents.head import HeadAgent
+from agents.writer import call_writer_llm
 from db import (
     get_projects,
     get_book_outline,
@@ -87,6 +88,7 @@ class ChatRequest(BaseModel):
     task: Optional[str] = None
     text: Optional[str] = None
     auto: bool = True
+    mode: Optional[str] = "head"
 
 
 class ChatResponse(BaseModel):
@@ -398,6 +400,19 @@ async def root() -> HTMLResponse:
                 font-size: 12px;
                 color: #9ca3af;
             }
+            .mode-switch {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+            }
+            .mode-select {
+                background: #0f172a;
+                color: #e5e7eb;
+                border: 1px solid #374151;
+                border-radius: 6px;
+                padding: 2px 6px;
+                font-size: 12px;
+            }
             .status {
                 font-size: 12px;
             }
@@ -474,6 +489,13 @@ async def root() -> HTMLResponse:
                         <input type="checkbox" id="auto" checked />
                         auto (--auto)
                     </label>
+                    <label class="mode-switch">
+                        Mode:
+                        <select id="mode" class="mode-select">
+                            <option value="head" selected>Head</option>
+                            <option value="writer">Writer</option>
+                        </select>
+                    </label>
                     <div id="status" class="status"></div>
                 </div>
             </div>
@@ -481,6 +503,7 @@ async def root() -> HTMLResponse:
         <script>
             const taskEl = document.getElementById('task');
             const autoEl = document.getElementById('auto');
+            const modeEl = document.getElementById('mode');
             const sendBtn = document.getElementById('send');
             const logEl = document.getElementById('log');
             const statusEl = document.getElementById('status');
@@ -968,6 +991,9 @@ async def root() -> HTMLResponse:
                 statusEl.textContent = 'Виконується...';
                 statusEl.classList.remove('error');
 
+                const mode = (modeEl && modeEl.value) ? modeEl.value : 'head';
+                const agentLabel = mode === 'writer' ? 'WriterAgent' : 'HeadAgent';
+
                 appendMessage('You', task);
                 taskEl.value = '';
 
@@ -979,7 +1005,8 @@ async def root() -> HTMLResponse:
                         },
                         body: JSON.stringify({
                             task: task,
-                            auto: autoEl.checked
+                            auto: autoEl.checked,
+                            mode: mode
                         })
                     });
                     if (!resp.ok) {
@@ -987,13 +1014,13 @@ async def root() -> HTMLResponse:
                     }
                     const data = await resp.json();
                     const text = data.reply || '(порожня відповідь)';
-                    appendMessage('HeadAgent', text);
+                    appendMessage(agentLabel, text);
                     statusEl.textContent = 'Готово';
                 } catch (err) {
                     console.error(err);
                     statusEl.textContent = 'Помилка: ' + err.message;
                     statusEl.classList.add('error');
-                    appendMessage('HeadAgent', 'Помилка при виклику /chat: ' + err.message);
+                    appendMessage(agentLabel, 'Помилка при виклику /chat: ' + err.message);
                 } finally {
                     sendBtn.disabled = false;
                     taskEl.focus();
@@ -1165,10 +1192,24 @@ async def chat(req: ChatRequest) -> ChatResponse:
     if not task:
         raise HTTPException(status_code=422, detail="Field required: task (or text)")
 
-    try:
-        reply = HEAD.handle(task, MEMORY)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"HeadAgent error: {exc}")
+    mode = (req.mode or "head").strip().lower()
+    if mode not in ("head", "writer"):
+        raise HTTPException(status_code=422, detail="Invalid mode (use head|writer)")
+
+    if mode == "writer":
+        try:
+            reply = call_writer_llm(task)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"WriterAgent error: {exc}")
+        try:
+            HEAD.log_writer_shadow(task, reply)
+        except Exception:
+            pass
+    else:
+        try:
+            reply = HEAD.handle(task, MEMORY)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"HeadAgent error: {exc}")
 
     return ChatResponse(task=task, auto=req.auto, reply=reply)
 

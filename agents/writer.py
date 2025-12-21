@@ -1,8 +1,10 @@
-from typing import Optional
+import os
+from typing import Optional, Dict
 
 from .base import BaseAgent, AgentResult, Context, Memory
 from .registry import register_agent
-from db import get_agent_config
+from db import get_agent_config, get_current_project, get_llm_config
+from llm_client import chat_openai_compat, env_default_base_url
 
 
 @register_agent
@@ -131,3 +133,66 @@ class WriterAgent(BaseAgent):
             )
 
         return AgentResult(agent=self.name, output=output, meta={"mode": "content"})
+
+
+WRITER_SYSTEM_PROMPT = (
+    "You are WriterAgent. Provide clear, well-structured writing help. "
+    "Be concise, avoid unnecessary fluff, and focus on the user's request."
+)
+
+
+def _get_current_project_name() -> Optional[str]:
+    try:
+        proj = get_current_project()
+    except Exception:
+        return None
+    if isinstance(proj, dict):
+        name = proj.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        return None
+    if isinstance(proj, str):
+        s = proj.strip()
+        return s if s else None
+    return None
+
+
+def call_writer_llm(task: str) -> str:
+    """
+    Виклик Writer через LM Studio / OpenAI-compatible з writer_model.
+    """
+    try:
+        project_name = _get_current_project_name()
+        cfg: Dict[str, str] = {}
+        if project_name:
+            try:
+                cfg = get_llm_config(project_name)
+            except Exception:
+                cfg = {}
+
+        base_url = cfg.get("base_url") or env_default_base_url()
+        model = cfg.get("writer_model") or os.getenv(
+            "WRITER_MODEL",
+            "mamaylm-gemma-2-9b-it",
+        )
+        reply = chat_openai_compat(
+            base_url=base_url,
+            model=model,
+            messages=[
+                {"role": "system", "content": WRITER_SYSTEM_PROMPT},
+                {"role": "user", "content": task},
+            ],
+            temperature=0.2,
+            timeout_s=int(os.getenv("LLM_TIMEOUT_S", "120")),
+        )
+    except Exception as exc:
+        return f"[WriterAgent/LM Studio помилка: {exc}]"
+
+    if not reply:
+        return "[WriterAgent/LM Studio не повернув текст відповіді]"
+
+    reply = reply.strip()
+    if not reply:
+        return "[WriterAgent/LM Studio повернув лише порожній рядок]"
+
+    return reply

@@ -209,6 +209,7 @@ def init_db() -> None:
             scene_id INTEGER,
 
             scope TEXT,
+            kind TEXT DEFAULT 'interaction',
             note_type TEXT,
 
             -- Вміст нотатки
@@ -243,6 +244,13 @@ def init_db() -> None:
         cur.execute("ALTER TABLE head_notes ADD COLUMN source TEXT")
     if "author" not in hn_columns:
         cur.execute("ALTER TABLE head_notes ADD COLUMN author TEXT")
+    if "kind" not in hn_columns:
+        cur.execute("ALTER TABLE head_notes ADD COLUMN kind TEXT DEFAULT 'interaction'")
+    # Підстраховка для старих записів без kind.
+    if "kind" in hn_columns:
+        cur.execute(
+            "UPDATE head_notes SET kind = 'interaction' WHERE kind IS NULL OR kind = ''"
+        )
 
     # Таблиця налаштувань проєктів (key/value, як для конфігів агентів)
     cur.execute(
@@ -1119,6 +1127,7 @@ def add_head_note(
     book_id: Optional[int] = None,
     chapter_id: Optional[int] = None,
     scene_id: Optional[int] = None,
+    kind: str = "note",
 ) -> int:
     """Додає нотатку HeadAgent'а в таблицю head_notes для вказаного проєкту.
 
@@ -1143,6 +1152,7 @@ def add_head_note(
             chapter_id,
             scene_id,
             scope,
+            kind,
             note_type,
             note,
             importance,
@@ -1152,7 +1162,7 @@ def add_head_note(
             created_at,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             project_id,
@@ -1160,6 +1170,7 @@ def add_head_note(
             chapter_id,
             scene_id,
             scope,
+            kind,
             note_type,
             note,
             importance,
@@ -1182,10 +1193,12 @@ def get_head_notes(
     scope: Optional[str] = None,
     min_importance: int = 1,
     limit: int = 50,
+    kinds: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Повертає список нотаток HeadAgent'а.
 
-    Можна фільтрувати за назвою проєкту (project_name) і scope ("global", "project", "book", "chapter", "scene").
+    Можна фільтрувати за назвою проєкту (project_name), scope
+    ("global", "project", "book", "chapter", "scene") і kind.
     """
     conn = get_connection()
     cur = conn.cursor()
@@ -1209,6 +1222,11 @@ def get_head_notes(
         where_clauses.append("scope = ?")
         params.append(scope)
 
+    if kinds:
+        placeholders = ", ".join(["?"] * len(kinds))
+        where_clauses.append(f"kind IN ({placeholders})")
+        params.extend(kinds)
+
     base_query = """
         SELECT
             id,
@@ -1217,6 +1235,7 @@ def get_head_notes(
             chapter_id,
             scene_id,
             scope,
+            kind,
             note_type,
             note,
             importance,
@@ -1248,6 +1267,7 @@ def get_head_notes(
                 "chapter_id": r["chapter_id"],
                 "scene_id": r["scene_id"],
                 "scope": r["scope"],
+                "kind": r["kind"],
                 "note_type": r["note_type"],
                 "note": r["note"],
                 "importance": r["importance"],
@@ -1260,6 +1280,169 @@ def get_head_notes(
         )
 
     return notes
+
+
+def get_head_notes_by_project_id(
+    project_id: int,
+    kinds: Optional[List[str]] = None,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Повертає нотатки HeadAgent'а для конкретного project_id."""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    params: List[Any] = [project_id]
+    where_clauses = ["project_id = ?"]
+
+    if kinds:
+        placeholders = ", ".join(["?"] * len(kinds))
+        where_clauses.append(f"kind IN ({placeholders})")
+        params.extend(kinds)
+
+    query = """
+        SELECT
+            id,
+            project_id,
+            book_id,
+            chapter_id,
+            scene_id,
+            scope,
+            kind,
+            note_type,
+            note,
+            importance,
+            tags,
+            source,
+            author,
+            created_at,
+            updated_at
+        FROM head_notes
+    """
+    if where_clauses:
+        query += " WHERE " + " AND ".join(where_clauses)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+
+    cur.execute(query, params)
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_head_notes(
+    project_id: int,
+    kinds: Optional[List[str]] = None,
+) -> int:
+    """Видаляє нотатки для project_id (опційно за kind)."""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    params: List[Any] = [project_id]
+    where_clauses = ["project_id = ?"]
+
+    if kinds:
+        placeholders = ", ".join(["?"] * len(kinds))
+        where_clauses.append(f"kind IN ({placeholders})")
+        params.extend(kinds)
+
+    query = "DELETE FROM head_notes"
+    if where_clauses:
+        query += " WHERE " + " AND ".join(where_clauses)
+
+    cur.execute(query, params)
+    deleted = cur.rowcount if cur.rowcount is not None else 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def dedupe_head_notes(project_id: int) -> int:
+    """Прибирає дублікати нотаток (тільки kind='note')."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, note
+        FROM head_notes
+        WHERE project_id = ? AND kind = ?
+        ORDER BY id DESC
+        """,
+        (project_id, "note"),
+    )
+    rows = cur.fetchall()
+    seen: set[str] = set()
+    to_delete: List[int] = []
+
+    for row in rows:
+        note = (row["note"] or "").strip()
+        normalized = " ".join(note.lower().split())
+        if normalized in seen:
+            to_delete.append(int(row["id"]))
+        else:
+            seen.add(normalized)
+
+    if to_delete:
+        placeholders = ", ".join(["?"] * len(to_delete))
+        cur.execute(
+            f"DELETE FROM head_notes WHERE id IN ({placeholders})",
+            to_delete,
+        )
+    conn.commit()
+    conn.close()
+    return len(to_delete)
+
+
+def search_head_notes(
+    project_id: int,
+    query: str,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Пошук по нотатках (kind='note') для конкретного project_id."""
+    conn = get_connection()
+    cur = conn.cursor()
+    q = f"%{query.lower()}%"
+    cur.execute(
+        """
+        SELECT
+            id,
+            project_id,
+            book_id,
+            chapter_id,
+            scene_id,
+            scope,
+            kind,
+            note_type,
+            note,
+            importance,
+            tags,
+            source,
+            author,
+            created_at,
+            updated_at
+        FROM head_notes
+        WHERE project_id = ? AND kind = ? AND lower(note) LIKE ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (project_id, "note", q, limit),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_head_note_by_id(project_id: int, note_id: int) -> bool:
+    """Видаляє одну нотатку (kind='note') за id."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM head_notes WHERE id = ? AND project_id = ? AND kind = ?",
+        (note_id, project_id, "note"),
+    )
+    deleted = cur.rowcount if cur.rowcount is not None else 0
+    conn.commit()
+    conn.close()
+    return deleted > 0
 
 
 def set_current_project(name: str) -> None:

@@ -5,6 +5,7 @@ import os
 import inspect
 import json
 import subprocess
+import re
 
 from typing import Any, Dict, Optional
 
@@ -22,8 +23,13 @@ from db import (
     set_current_project,
     get_recent_errors,  # ми вже додавали це раніше
     add_head_note,
-    get_head_notes,
     get_llm_config,
+    get_project_id_by_name,
+    get_head_notes_by_project_id,
+    delete_head_notes,
+    dedupe_head_notes,
+    search_head_notes,
+    delete_head_note_by_id,
 )
 
 from .head_profile import build_head_system_prompt
@@ -31,6 +37,25 @@ from llm_client import chat_openai_compat, env_default_base_url
 
 
 class HeadAgent:
+    def _looks_like_preference(self, lower_norm: str) -> bool:
+        """М'яке побажання/скарга без маркерів домовленості — відповісти коротко, без сейву."""
+        s = (lower_norm or "").strip()
+        if not s:
+            return False
+        # якщо це питання — точно не preference-shortcut
+        if "?" in s:
+            return False
+        markers = (
+            "не треба щоб",
+            "не потрібно щоб",
+            "не хочу щоб",
+            "мені не треба",
+            "будь ласка не",
+            "не роби",
+            "не робіть",
+            "не роби так",
+        )
+        return any(m in s for m in markers) and len(s) <= 180
     """
     Головний агент: приймає людські фрази і вирішує,
     що робити всередині multi-agent-lab.
@@ -76,11 +101,15 @@ class HeadAgent:
                 "HEAD_MODEL",
                 "qwen2.5-7b-instruct-1m",
             )
+            notes_block = self._build_notes_context()
+            system_prompt = self.system_prompt
+            if notes_block:
+                system_prompt = system_prompt + "\n\n" + notes_block
             reply = chat_openai_compat(
                 base_url=base_url,
                 model=model,
                 messages=[
-                    {"role": "system", "content": self.system_prompt},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_text},
                 ],
                 temperature=0.2,
@@ -144,6 +173,8 @@ class HeadAgent:
 
         Важливо: не ламаємо чат, якщо БД/схема/параметри не співпали — просто мовчки ігноруємо.
         """
+        if not self._interaction_logging_enabled():
+            return
         project_name = self._get_current_project_name()
         if not project_name:
             return
@@ -161,6 +192,7 @@ class HeadAgent:
                 tags="head,interaction",
                 source="head_agent",
                 author="head",
+                kind="interaction",
             )
             return
         except TypeError:
@@ -169,37 +201,464 @@ class HeadAgent:
         except Exception:
             return
 
+    def _shorten_text(self, text: str, limit: int = 220) -> str:
+        s = " ".join((text or "").split())
+        if len(s) <= limit:
+            return s
+        return s[:limit].rstrip() + "…"
+
+    def _needs_follow_up(self, text: str) -> bool:
+        t = (text or "").lower()
+        if not t:
+            return False
+        markers = ["todo", "next", "follow", "потрібно", "далі", "наступ", "?"]
+        return any(m in t for m in markers)
+
+    def log_writer_shadow(self, user_text: str, writer_reply: str) -> None:
+        """Записує короткий shadow-лог WriterAgent-а в head_notes."""
+        if not self._shadow_logging_enabled():
+            return
+        project_name = self._get_current_project_name()
+        if not project_name:
+            return
+
+        short_task = self._shorten_text(user_text, 180)
+        short_reply = self._shorten_text(writer_reply, 240)
+        next_action = (
+            "Потрібні подальші дії."
+            if self._needs_follow_up(writer_reply)
+            else "Подальші дії не потрібні."
+        )
+        note_text = (
+            "SHADOW (writer): "
+            f"Запит: {short_task}. "
+            f"Відповідь: {short_reply}. "
+            f"{next_action}"
+        )
+
         try:
-            # Мінімальний фолбек: тільки те, що майже напевно є.
-            add_head_note(project_name, note_text)
+            add_head_note(
+                project_name,
+                scope="project",
+                note_type="shadow",
+                note=note_text,
+                importance=1,
+                tags="shadow,writer",
+                source="writer_mode",
+                author="head",
+                kind="shadow",
+            )
+            return
+        except TypeError:
+            pass
         except Exception:
             return
 
-    def _format_head_notes(self, notes: Any) -> str:
-        """Гарне форматування списку нотаток для відповіді в чаті."""
+        try:
+            add_head_note(project_name, note_text, kind="shadow")
+        except Exception:
+            return
+
+        try:
+            # Мінімальний фолбек: тільки те, що майже напевно є.
+            add_head_note(project_name, note_text, kind="shadow")
+        except Exception:
+            return
+
+    def _format_head_notes(self, notes: Any, empty_message: str) -> str:
+        """Форматує список нотаток у короткий перелік."""
         if not notes:
-            return "Нотаток HeadAgent-а поки немає."
+            return empty_message
 
         # Очікуємо list[dict], але робимо фолбеки
         if not isinstance(notes, list):
-            return f"Нотатки: {notes}"
+            return str(notes)
 
-        lines = ["Останні head нотатки:"]
-        for i, n in enumerate(notes, start=1):
+        lines = []
+        for n in notes:
             if isinstance(n, dict):
-                created = n.get("created_at") or n.get("updated_at") or ""
-                note_type = n.get("note_type") or ""
+                created = (n.get("created_at") or n.get("updated_at") or "").strip()
+                kind = (n.get("kind") or n.get("note_type") or "").strip()
                 note = (n.get("note") or "").strip()
-                if len(note) > 400:
-                    note = note[:400].rstrip() + "…"
-                meta = " | ".join([p for p in [created, note_type] if p])
+                if len(note) > 260:
+                    note = note[:260].rstrip() + "…"
+                meta = " | ".join([p for p in [created, kind] if p])
                 if meta:
-                    lines.append(f"{i}) [{meta}]\n{note}")
+                    lines.append(f"- [{meta}] {note}")
                 else:
-                    lines.append(f"{i}) {note}")
+                    lines.append(f"- {note}")
             else:
-                lines.append(f"{i}) {n}")
-        return "\n\n".join(lines)
+                lines.append(f"- {n}")
+        return "\n".join(lines)
+
+    def _format_note_items(self, notes: Any, empty_message: str) -> str:
+        """Форматує список корисних нотаток з тегами та id."""
+        if not notes:
+            return empty_message
+
+        if not isinstance(notes, list):
+            return str(notes)
+
+        lines = []
+        for n in notes:
+            if isinstance(n, dict):
+                created = (n.get("created_at") or n.get("updated_at") or "").strip()
+                tag = (n.get("tags") or n.get("note_type") or "note").strip()
+                note_id = n.get("id")
+                note = (n.get("note") or "").strip()
+                if len(note) > 260:
+                    note = note[:260].rstrip() + "…"
+                meta_parts = []
+                if created:
+                    meta_parts.append(created)
+                if tag:
+                    meta_parts.append(tag)
+                if note_id is not None:
+                    meta_parts.append(f"id={note_id}")
+                meta = " | ".join(meta_parts)
+                if meta:
+                    lines.append(f"- [{meta}] {note}")
+                else:
+                    lines.append(f"- {note}")
+            else:
+                lines.append(f"- {n}")
+        return "\n".join(lines)
+
+    def _extract_notes_limit(self, text: str, default: int = 10) -> int:
+        """Витягує ліміт з тексту запиту (українською/англійською)."""
+        matches = re.findall(r"\d+", text)
+        if matches:
+            try:
+                value = int(matches[0])
+                if value > 0:
+                    return value
+            except Exception:
+                pass
+        # Якщо явно просять "всі", даємо підвищений ліміт.
+        if "всі" in text or "all" in text:
+            return 200
+        return default
+
+    def _interaction_logging_enabled(self) -> bool:
+        """Чи дозволено логувати interaction-нотатки (за замовчуванням вимкнено)."""
+        value = os.getenv("HEAD_LOG_INTERACTIONS", "").strip().lower()
+        return value in ("1", "true", "yes", "on")
+
+    def _shadow_logging_enabled(self) -> bool:
+        """Чи дозволено логувати shadow-нотатки (за замовчуванням вимкнено)."""
+        value = os.getenv("HEAD_LOG_SHADOW", "").strip().lower()
+        return value in ("1", "true", "yes", "on")
+
+    def _get_current_project_id(self) -> Optional[int]:
+        """Повертає project_id для поточного проєкту."""
+        project_name = self._get_current_project_name()
+        if not project_name:
+            return None
+        try:
+            return get_project_id_by_name(project_name)
+        except Exception:
+            return None
+
+    def _normalize_note_text(self, text: str) -> str:
+        """Нормалізує текст нотатки для дедупу."""
+        s = (text or "").strip()
+        for ch in ("’", "ʼ", "`"):
+            s = s.replace(ch, "'")
+        lower = s.lower()
+        prefixes = (
+            "запам'ятай правило",
+            "запам'ятай",
+            "правило",
+            "rule",
+            "нотатка",
+            "note",
+            "збережи",
+        )
+        for p in prefixes:
+            if lower.startswith(p):
+                s = s[len(p):].strip()
+                break
+        s = s.lstrip(":—- ").strip()
+        if len(s) >= 2:
+            quote_pairs = (
+                ('"', '"'),
+                ("'", "'"),
+                ("“", "”"),
+                ("«", "»"),
+            )
+            for left, right in quote_pairs:
+                if s.startswith(left) and s.endswith(right):
+                    s = s[1:-1].strip()
+                    break
+        s = re.sub(r"\s+", " ", s)
+        return s
+
+    def _parse_note_save_request(self, lower_norm: str) -> Optional[str]:
+        """Повертає тег для запиту 'запамʼятай ...', якщо це він."""
+        if lower_norm.startswith("запам'ятай правило:"):
+            return "rule"
+        if lower_norm.startswith("запам'ятай рішення:"):
+            return "decision"
+        if lower_norm.startswith("запам'ятай факт:"):
+            return "fact"
+        if lower_norm.startswith("запам'ятай:"):
+            return "note"
+        if lower_norm.startswith("правило:"):
+            return "rule"
+        if lower_norm.startswith("rule:"):
+            return "rule"
+        if lower_norm.startswith("збережи:"):
+            return "note"
+        if lower_norm.startswith("нотатка:"):
+            return "note"
+        if lower_norm.startswith("note:"):
+            return "note"
+        return None
+
+    def _build_notes_context(self) -> str:
+        """Готує блок корисних нотаток для LLM."""
+        project_id = self._get_current_project_id()
+        if not project_id:
+            return ""
+        try:
+            notes = get_head_notes_by_project_id(
+                project_id,
+                kinds=["note", "rule"],
+                limit=10,
+            )
+        except Exception:
+            return ""
+        if not notes:
+            return ""
+        lines = ["Корисні нотатки (поточний проєкт):"]
+        for n in notes:
+            tag = (n.get("tags") or n.get("note_type") or "note").strip()
+            text = (n.get("note") or "").strip()
+            if len(text) > 220:
+                text = text[:220].rstrip() + "…"
+            lines.append(f"- [{tag}] {text}")
+        return "\n".join(lines)
+
+    def _save_note(self, tag: str, note_text: str) -> str:
+        """Зберігає нотатку з дедупом."""
+        project_name = self._get_current_project_name()
+        if not project_name:
+            return "Немає активного проєкту, тому не можу зберегти нотатку."
+
+        note_kind = "rule" if tag == "rule" else "note"
+
+        project_id = self._get_current_project_id()
+        if project_id:
+            try:
+                existing = get_head_notes_by_project_id(
+                    project_id,
+                    kinds=[note_kind],
+                    limit=200,
+                )
+            except Exception:
+                existing = []
+            for n in existing:
+                existing_text = self._normalize_note_text(str(n.get("note", "")))
+                existing_kind = (n.get("kind") or "").strip() or "note"
+                existing_tag = (n.get("tags") or n.get("note_type") or "").strip()
+                if (
+                    existing_kind == note_kind
+                    and existing_text == note_text
+                    and existing_tag == tag
+                ):
+                    return "Вже є така нотатка."
+
+        try:
+            add_head_note(
+                project_name,
+                scope="project",
+                note_type=tag,
+                note=note_text,
+                importance=1,
+                tags=tag,
+                source="user",
+                author="user",
+                kind=note_kind,
+            )
+        except Exception as e:
+            return f"Не вдалося зберегти нотатку: {e}"
+
+        return "Збережено."
+
+    def _get_flag(self, memory: Any, name: str, default: Any = None) -> Any:
+        """Безпечне читання прапорця з memory."""
+        if memory is None:
+            return default
+        getter = getattr(memory, "get_flag", None)
+        if callable(getter):
+            return getter(name, default)
+        flags = getattr(memory, "flags", None)
+        if isinstance(flags, dict):
+            return flags.get(name, default)
+        return default
+
+    def _set_flag(self, memory: Any, name: str, value: Any) -> None:
+        """Безпечне встановлення прапорця у memory."""
+        if memory is None:
+            return
+        setter = getattr(memory, "set_flag", None)
+        if callable(setter):
+            setter(name, value)
+            return
+        flags = getattr(memory, "flags", None)
+        if isinstance(flags, dict):
+            flags[name] = value
+
+    def _clear_flag(self, memory: Any, name: str) -> None:
+        """Безпечне очищення прапорця у memory."""
+        if memory is None:
+            return
+        setter = getattr(memory, "set_flag", None)
+        if callable(setter):
+            setter(name, None)
+            return
+        flags = getattr(memory, "flags", None)
+        if isinstance(flags, dict):
+            flags.pop(name, None)
+
+    def _set_pending_queue(self, memory: Any, queue: list[dict]) -> None:
+        """Записує pending-чергу в memory."""
+        if memory is None:
+            return
+        flags = getattr(memory, "flags", None)
+        if not isinstance(flags, dict):
+            try:
+                setattr(memory, "flags", {})
+                flags = memory.flags  # type: ignore[attr-defined]
+            except Exception:
+                flags = None
+        if isinstance(flags, dict):
+            flags["pending_memory"] = queue
+            return
+        self._set_flag(memory, "pending_memory", queue)
+
+    def _get_pending_queue(self, memory: Any) -> list[dict]:
+        """Повертає pending-чергу (FIFO)."""
+        pending = None
+        flags = getattr(memory, "flags", None)
+        if isinstance(flags, dict):
+            pending = flags.get("pending_memory")
+        if pending is None:
+            pending = self._get_flag(memory, "pending_memory")
+
+        if isinstance(pending, dict):
+            pending = [pending]
+
+        queue: list[dict] = []
+        if isinstance(pending, list):
+            for item in pending:
+                if isinstance(item, dict) and item.get("kind") and item.get("text"):
+                    queue.append(
+                        {"kind": str(item["kind"]), "text": str(item["text"])}
+                    )
+            # Нормалізуємо зворотно (list замість dict, без сміття).
+            self._set_pending_queue(memory, queue)
+        return queue
+
+    def _enqueue_pending(self, memory: Any, kind: str, text: str) -> int:
+        """Додає pending у кінець черги (без дублів)."""
+        queue = self._get_pending_queue(memory)
+        for idx, item in enumerate(queue, start=1):
+            if item.get("kind") == kind and item.get("text") == text:
+                return idx
+        queue.append({"kind": kind, "text": text})
+        self._set_pending_queue(memory, queue)
+        return len(queue)
+
+    def _pop_pending(self, memory: Any) -> Optional[Dict[str, str]]:
+        """Знімає перший pending з черги."""
+        queue = self._get_pending_queue(memory)
+        if not queue:
+            return None
+        item = queue.pop(0)
+        if queue:
+            self._set_pending_queue(memory, queue)
+        else:
+            self._clear_flag(memory, "pending_memory")
+        return item
+
+    def _peek_pending(self, memory: Any) -> Optional[Dict[str, str]]:
+        """Повертає перший pending без змін."""
+        queue = self._get_pending_queue(memory)
+        if not queue:
+            return None
+        return queue[0]
+
+    def _pending_count(self, memory: Any) -> int:
+        """Кількість pending-елементів у черзі."""
+        return len(self._get_pending_queue(memory))
+
+    def _is_yes(self, text: str) -> bool:
+        """Чи є відповідь підтвердженням."""
+        t = (text or "").strip().lower()
+        t = t.strip(" .,!?:;")
+        return t in ("так", "yes", "ok", "ок")
+
+    def _is_no(self, text: str) -> bool:
+        """Чи є відповідь відмовою."""
+        t = (text or "").strip().lower()
+        t = t.strip(" .,!?:;")
+        return t in ("ні", "no", "не треба", "не потрібно", "скасувати", "cancel")
+
+    def _should_prompt_rule(self, lower_norm: str) -> bool:
+        """Чи варто перепитати про правило."""
+        if lower_norm.startswith(("нотатки", "лог", "покажи", "видали", "почисти", "tool ")):
+            return False
+        if "?" in lower_norm:
+            return False
+        if any(
+            m in lower_norm
+            for m in ("може", "напевно", "як думаєш", "здається")
+        ):
+            return False
+        if re.search(r"\bчи\b", lower_norm):
+            return False
+        s = lower_norm.strip()
+        # Питаємо ТІЛЬКИ при явних маркерах “домовленості”
+        return s.startswith(
+            (
+                "відтепер",
+                "завжди",
+                "ніколи",
+                "правило",
+                "rule",
+                "давай домовимось",
+                "робимо так",
+            )
+        )
+
+    def _is_notes_view_request(self, lower_text: str) -> bool:
+        """Чи просить користувач показати нотатки."""
+        t = (lower_text or "").strip()
+        if t.startswith("нотатки пошук"):
+            return False
+
+        # Командні форми (строго), щоб не тригеритись на "нотаткою/нотатка" в звичайних реченнях
+        if re.match(r"^(нотатки)(\s+\d+)?$", t):
+            return True
+        if re.match(r"^(покажи\s+нотатки)(\s+\d+)?$", t):
+            return True
+        if t in (
+            "head нотатки",
+            "покажи head нотатки",
+            "покажи нотатки head",
+            "show head notes",
+        ):
+            return True
+        return False
+
+    def _is_log_view_request(self, lower_text: str) -> bool:
+        """Чи просить користувач показати лог."""
+        if re.search(r"\bлог\b", lower_text):
+            return True
+        if "show log" in lower_text:
+            return True
+        return False
 
     def _is_pytest_request(self, user_text: str) -> bool:
         """Чи просить користувач запустити pytest."""
@@ -518,6 +977,80 @@ class HeadAgent:
         """
         clean = text.strip()
         lower = clean.lower()
+        lower_norm = lower.replace("’", "'").replace("ʼ", "'").replace("`", "'")
+
+        # --- 0. Pending-підтвердження (до будь-яких LLM/route) ---
+        pending_view = lower_norm.startswith(
+            ("pending", "непідтверджені", "покажи pending", "покажи непідтверджені")
+        )
+        pending_queue = self._get_pending_queue(memory)
+        if pending_queue and not pending_view:
+            if self._is_yes(lower):
+                item = self._pop_pending(memory)
+                if item:
+                    result = self._save_note(item["kind"], item["text"])
+                    if result.startswith("Не вдалося"):
+                        return result
+                if self._pending_count(memory) > 0:
+                    next_item = self._peek_pending(memory)
+                    if next_item:
+                        preview = self._shorten_text(next_item["text"], 120)
+                        return f"Ок. Наступне правило: {preview}. Зберегти? (так/ні)"
+                return "Збережено."
+            if self._is_no(lower):
+                self._pop_pending(memory)
+                if self._pending_count(memory) > 0:
+                    next_item = self._peek_pending(memory)
+                    if next_item:
+                        preview = self._shorten_text(next_item["text"], 120)
+                        return f"Ок. Наступне правило: {preview}. Зберегти? (так/ні)"
+                return "Ок, не зберігаю."
+            # якщо користувач продовжив іншою думкою — можемо додати правило в чергу
+            if self._should_prompt_rule(lower_norm):
+                note_text = self._normalize_note_text(clean)
+                if note_text:
+                    pos = self._enqueue_pending(memory, "rule", note_text)
+                    preview = self._shorten_text(note_text, 120)
+                    return (
+                        f"Додав у чергу правило #{pos}: {preview}. "
+                        "Зберегти? (так/ні). Подивитись список: 'pending'."
+                    )
+            return "Підтверди 'так' або 'ні'."
+
+        # --- 1. Перегляд pending-черги (до будь-яких LLM/route) ---
+        if pending_view:
+            queue = self._get_pending_queue(memory)
+            if not queue:
+                return "Немає непідтверджених правил."
+            lines = ["Непідтверджені правила:"]
+            for idx, item in enumerate(queue, start=1):
+                preview = self._shorten_text(item["text"], 120)
+                lines.append(f"{idx}) {preview}")
+            return "\n".join(lines)
+
+        # --- 2. Класифікація memory intent (до будь-яких LLM/route) ---
+        tag = self._parse_note_save_request(lower_norm)
+        if tag:
+            parts = clean.split(":", 1)
+            note_text = parts[1].strip() if len(parts) > 1 else ""
+            note_text = self._normalize_note_text(note_text)
+            if not note_text:
+                return "ОК, що саме запамʼятати?"
+            return self._save_note(tag, note_text)
+
+        if self._should_prompt_rule(lower_norm):
+            note_text = self._normalize_note_text(clean)
+            if note_text:
+                pos = self._enqueue_pending(memory, "rule", note_text)
+                preview = self._shorten_text(note_text, 120)
+                return (
+                    f"Додав у чергу правило #{pos}: {preview}. "
+                    "Зберегти? (так/ні). Подивитись список: 'pending'."
+                )
+
+        # Побажання без маркерів домовленості — просто коротко підтвердити (без логів/нотаток)
+        if self._looks_like_preference(lower_norm):
+            return "Ок, прийняв."
 
         # --- 0. Tools-first allowlist (explicit tool invocation) ---
         if lower.startswith("tool "):
@@ -642,29 +1175,110 @@ class HeadAgent:
                 lines.append(f"- id={p['id']} | name={p['name']} | status={p['status']}")
             return "\n".join(lines)
 
-        # --- 4. Head нотатки ---
-        if lower in (
-            "head нотатки",
-            "покажи head нотатки",
-            "покажи нотатки head",
-            "show head notes",
-        ):
-            project_name = self._get_current_project_name()
-            if not project_name:
-                return "Немає активного проєкту, тому і head нотатки показати не можу."
-
+        # --- 4. Нотатки і лог HeadAgent-а ---
+        if lower.startswith("почисти старий лог") or lower.startswith("почисти лог"):
+            project_id = self._get_current_project_id()
+            if not project_id:
+                return "Немає активного проєкту, тому лог чистити не можу."
             try:
-                notes = get_head_notes(project_name=project_name, limit=5)
-            except TypeError:
-                # Фолбек для іншої сигнатури
-                try:
-                    notes = get_head_notes(project_name, 5)
-                except Exception as e:
-                    return f"Не вдалося прочитати head нотатки: {e}"
+                deleted = delete_head_notes(project_id, kinds=["interaction", "shadow"])
             except Exception as e:
-                return f"Не вдалося прочитати head нотатки: {e}"
+                return f"Не вдалося почистити лог: {e}"
+            return f"Лог очищено ({deleted} записів)."
 
-            return self._format_head_notes(notes)
+        if lower.startswith("почисти нотатки"):
+            project_id = self._get_current_project_id()
+            if not project_id:
+                return "Немає активного проєкту, тому нотатки чистити не можу."
+            try:
+                deleted = delete_head_notes(project_id, kinds=["note"])
+            except Exception as e:
+                return f"Не вдалося почистити нотатки: {e}"
+            return f"Нотатки очищено ({deleted} записів)."
+
+        if lower.startswith("почисти все"):
+            if "підтверджую" not in lower:
+                return "Щоб почистити все, напиши: 'почисти все підтверджую'."
+            project_id = self._get_current_project_id()
+            if not project_id:
+                return "Немає активного проєкту, тому чистити нічого."
+            try:
+                deleted = delete_head_notes(project_id)
+            except Exception as e:
+                return f"Не вдалося почистити все: {e}"
+            return f"Усі нотатки очищено ({deleted} записів)."
+
+        if lower.startswith("прибери дублікати нотаток"):
+            project_id = self._get_current_project_id()
+            if not project_id:
+                return "Немає активного проєкту, тому дублікати прибрати не можу."
+            try:
+                removed = dedupe_head_notes(project_id)
+            except Exception as e:
+                return f"Не вдалося прибрати дублікати: {e}"
+            return f"Дублікати прибрано ({removed} записів)."
+
+        if lower.startswith("видали нотатку"):
+            project_id = self._get_current_project_id()
+            if not project_id:
+                return "Немає активного проєкту, тому нотатку видалити не можу."
+            match = re.search(r"\b(\d+)\b", lower)
+            if not match:
+                return "Вкажи id нотатки, наприклад: 'видали нотатку 12'."
+            try:
+                note_id = int(match.group(1))
+            except Exception:
+                return "Невірний id нотатки."
+            try:
+                ok = delete_head_note_by_id(project_id, note_id)
+            except Exception as e:
+                return f"Не вдалося видалити нотатку: {e}"
+            if not ok:
+                return "Нотатку не знайдено."
+            return "Нотатку видалено."
+
+        if lower.startswith("нотатки пошук"):
+            project_id = self._get_current_project_id()
+            if not project_id:
+                return "Немає активного проєкту, тому нотатки показати не можу."
+            search_text = clean[len("нотатки пошук"):].strip()
+            if not search_text:
+                return "Вкажи текст для пошуку, наприклад: 'нотатки пошук логувати'."
+            try:
+                notes = search_head_notes(project_id, search_text, limit=20)
+            except Exception as e:
+                return f"Не вдалося виконати пошук: {e}"
+            return self._format_note_items(notes, "Нічого не знайдено.")
+
+        if self._is_log_view_request(lower):
+            project_id = self._get_current_project_id()
+            if not project_id:
+                return "Немає активного проєкту, тому лог показати не можу."
+            try:
+                limit = self._extract_notes_limit(lower, default=20)
+                notes = get_head_notes_by_project_id(
+                    project_id,
+                    kinds=["interaction", "shadow"],
+                    limit=limit,
+                )
+            except Exception as e:
+                return f"Не вдалося прочитати лог: {e}"
+            return self._format_head_notes(notes, "Лог порожній.")
+
+        if self._is_notes_view_request(lower):
+            project_id = self._get_current_project_id()
+            if not project_id:
+                return "Немає активного проєкту, тому нотатки показати не можу."
+            try:
+                limit = self._extract_notes_limit(lower, default=10)
+                notes = get_head_notes_by_project_id(
+                    project_id,
+                    kinds=["note"],
+                    limit=limit,
+                )
+            except Exception as e:
+                return f"Не вдалося прочитати нотатки: {e}"
+            return self._format_note_items(notes, "Нотаток HeadAgent-а поки немає.")
 
         # --- 5. Детерміновані репо-інструменти (без LLM) ---
         if any(
