@@ -271,6 +271,11 @@ async def root() -> HTMLResponse:
                 gap: 6px;
                 margin-bottom: 8px;
             }
+            .dev-patch-row {
+                display: flex;
+                gap: 6px;
+                margin-top: 8px;
+            }
             #dev-search-q {
                 flex: 1;
                 border-radius: 6px;
@@ -280,6 +285,25 @@ async def root() -> HTMLResponse:
                 padding: 6px 8px;
                 font-size: 12px;
                 box-sizing: border-box;
+            }
+            #dev-patch {
+                width: 100%;
+                height: 140px;
+                border-radius: 8px;
+                border: 1px solid #1f2933;
+                background: #0f172a;
+                color: #e5e7eb;
+                padding: 8px;
+                font-size: 12px;
+                font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+                box-sizing: border-box;
+                resize: vertical;
+            }
+            .dev-hint {
+                font-size: 11px;
+                color: #9ca3af;
+                margin-top: 6px;
+                margin-bottom: 6px;
             }
             #dev-output {
                 border-radius: 8px;
@@ -421,6 +445,12 @@ async def root() -> HTMLResponse:
                     <input id="dev-search-q" placeholder="Search in repo..." />
                     <button id="dev-search-btn" class="btn-ghost" type="button">Search</button>
                 </div>
+                <textarea id="dev-patch" placeholder="Paste unified diff patch here..."></textarea>
+                <div class="dev-hint">Спочатку перевір Patch через Check, потім застосовуй Apply.</div>
+                <div class="dev-patch-row">
+                    <button id="dev-patch-check" class="btn-ghost" type="button">Check patch</button>
+                    <button id="dev-patch-apply" class="btn-secondary" type="button">Apply patch</button>
+                </div>
                 <pre id="dev-output"></pre>
             </div>
             <div id="structure-panel" class="structure-panel hidden">
@@ -467,6 +497,9 @@ async def root() -> HTMLResponse:
             const devRefreshStatusBtn = document.getElementById('dev-refresh-status');
             const devRefreshDiffBtn = document.getElementById('dev-refresh-diff');
             const devRefreshErrorsBtn = document.getElementById('dev-refresh-errors');
+            const devPatchEl = document.getElementById('dev-patch');
+            const devPatchCheckBtn = document.getElementById('dev-patch-check');
+            const devPatchApplyBtn = document.getElementById('dev-patch-apply');
             let structureVisible = false;
             let outlineLoaded = false;
             let devVisible = false;
@@ -735,6 +768,59 @@ async def root() -> HTMLResponse:
                 }
             }
 
+            async function devPatchCheck() {
+                if (!devPatchEl) return;
+                const patch = devPatchEl.value || '';
+                if (patch.trim().length < 10) {
+                    setDevOutput('Patch too short');
+                    return;
+                }
+                const r = await devRunTool('git_apply_check', { patch: patch });
+                if (!r.ok) {
+                    setDevOutput('ERROR: ' + r.error);
+                    return;
+                }
+                const rc = r.data && typeof r.data.returncode !== 'undefined' ? r.data.returncode : 'unknown';
+                const err = (r.data && r.data.stderr) || '';
+                if (rc === 0) {
+                    setDevOutput(err ? ('OK\\n' + err) : 'OK');
+                } else {
+                    setDevOutput('ERROR: returncode=' + rc + (err ? '\\n' + err : ''));
+                }
+            }
+
+            async function devPatchApply() {
+                if (!devPatchEl) return;
+                const patch = devPatchEl.value || '';
+                if (patch.trim().length < 10) {
+                    setDevOutput('Patch too short');
+                    return;
+                }
+                const check = await devRunTool('git_apply_check', { patch: patch });
+                if (!check.ok) {
+                    setDevOutput('ERROR: ' + check.error);
+                    return;
+                }
+                const checkRc = check.data && typeof check.data.returncode !== 'undefined' ? check.data.returncode : 'unknown';
+                if (checkRc !== 0) {
+                    const err = (check.data && check.data.stderr) || '';
+                    setDevOutput('ERROR: returncode=' + checkRc + (err ? '\\n' + err : ''));
+                    return;
+                }
+                const apply = await devRunTool('git_apply', { patch: patch });
+                if (!apply.ok) {
+                    setDevOutput('ERROR: ' + apply.error);
+                    return;
+                }
+                const rc = apply.data && typeof apply.data.returncode !== 'undefined' ? apply.data.returncode : 'unknown';
+                const err = (apply.data && apply.data.stderr) || '';
+                if (rc === 0) {
+                    setDevOutput(err ? ('Applied\\n' + err) : 'Applied');
+                } else {
+                    setDevOutput('ERROR: returncode=' + rc + (err ? '\\n' + err : ''));
+                }
+            }
+
             if (toggleDevBtn && devPanel) {
                 toggleDevBtn.addEventListener('click', () => {
                     devVisible = !devVisible;
@@ -764,6 +850,16 @@ async def root() -> HTMLResponse:
             if (devSearchBtn) {
                 devSearchBtn.addEventListener('click', () => {
                     devSearch();
+                });
+            }
+            if (devPatchCheckBtn) {
+                devPatchCheckBtn.addEventListener('click', () => {
+                    devPatchCheck();
+                });
+            }
+            if (devPatchApplyBtn) {
+                devPatchApplyBtn.addEventListener('click', () => {
+                    devPatchApply();
                 });
             }
 
