@@ -25,6 +25,17 @@ def _run_cmd(cmd: list[str], timeout_s: int = 20) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
+def _run_cmd_with_input(cmd: list[str], input_text: str, timeout_s: int = 20) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        cmd,
+        input=input_text,
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+    )
+    return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
 def _run_pytest() -> dict:
     cmd = ["python", "-m", "pytest", "-q"]
     try:
@@ -80,6 +91,11 @@ def _validate_args(spec: ToolSpec, args: Any) -> dict[str, Any]:
         elif kind == "string":
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be string")
+            if key == "patch":
+                if len(value) < 10:
+                    raise ValueError("patch too short")
+                validated[key] = value
+                continue
             value = value.strip()
             if key == "query" and len(value) < 2:
                 raise ValueError("query too short")
@@ -107,6 +123,32 @@ def _tool_repo_search(args: dict[str, Any]) -> dict:
     return rt.repo_search(query=args["query"], max_matches=args.get("max_matches", 50))
 
 
+def _tool_git_apply_check(args: dict[str, Any]) -> dict:
+    code, out, err = _run_cmd_with_input(
+        ["git", "apply", "--check", "-"],
+        args["patch"],
+        timeout_s=20,
+    )
+    return {
+        "returncode": code,
+        "stdout": _truncate(out.strip()),
+        "stderr": _truncate(err.strip()),
+    }
+
+
+def _tool_git_apply(args: dict[str, Any]) -> dict:
+    code, out, err = _run_cmd_with_input(
+        ["git", "apply", "-"],
+        args["patch"],
+        timeout_s=20,
+    )
+    return {
+        "returncode": code,
+        "stdout": _truncate(out.strip()),
+        "stderr": _truncate(err.strip()),
+    }
+
+
 def _tool_recent_errors(args: dict[str, Any]) -> list[dict]:
     return get_recent_errors(limit=args.get("limit", 10))
 
@@ -131,6 +173,24 @@ _TOOLS: list[ToolSpec] = [
             "limit": {"type": "int?", "default": 8000},
         },
         handler=_tool_git_diff,
+    ),
+    ToolSpec(
+        name="git_apply_check",
+        description="Dry-run apply a unified diff (git apply --check)",
+        args_schema={"patch": "string"},
+        arg_specs={
+            "patch": {"type": "string", "default": ""},
+        },
+        handler=_tool_git_apply_check,
+    ),
+    ToolSpec(
+        name="git_apply",
+        description="Apply a unified diff (git apply)",
+        args_schema={"patch": "string"},
+        arg_specs={
+            "patch": {"type": "string", "default": ""},
+        },
+        handler=_tool_git_apply,
     ),
     ToolSpec(
         name="repo_search",
