@@ -20,7 +20,7 @@ from db import (
 )
 
 from .head_profile import build_head_system_prompt
-from ollama_client import call_head_llm
+from llm_client import chat_openai_compat, env_default_base_url
 
 
 class HeadAgent:
@@ -37,32 +37,36 @@ class HeadAgent:
 
     def ask_llm(self, user_text: str) -> str:
         """
-        Виклик Qwen через Ollama як "мозок" HeadAgent-а.
+        Виклик LM Studio / OpenAI-compatible як "мозок" HeadAgent-а.
 
         Поки що:
         - використовуємо системний промпт з head_profile,
-        - звертаємось до моделі qwen3:8b,
+        - звертаємось до моделі з HEAD_MODEL (за замовчуванням qwen2.5-7b-instruct-1m),
         - не обмежуємо max_tokens (щоб не обрізати відповідь штучно),
         - якщо щось пішло не так — повертаємо зрозуміле повідомлення про помилку.
         """
         try:
-            reply = call_head_llm(
-                user_text=user_text,
-                system_prompt=self.system_prompt,
-                model="qwen3:8b",
+            base_url = env_default_base_url()
+            model = os.getenv("HEAD_MODEL", "qwen2.5-7b-instruct-1m")
+            reply = chat_openai_compat(
+                base_url=base_url,
+                model=model,
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": user_text},
+                ],
                 temperature=0.2,
-                # max_tokens не задаємо: довжину контролює сама модель,
-                # а лаконічність ми задаємо в HEAD_SYSTEM_PROMPT.
+                timeout_s=int(os.getenv("LLM_TIMEOUT_S", "120")),
             )
         except Exception as e:
-            return f"[HeadAgent/Qwen помилка: {e}]"
+            return f"[HeadAgent/LM Studio помилка: {e}]"
 
         if not reply:
-            return "[HeadAgent/Qwen не повернув текст відповіді]"
+            return "[HeadAgent/LM Studio не повернув текст відповіді]"
 
         reply = reply.strip()
         if not reply:
-            return "[HeadAgent/Qwen повернув лише порожній рядок]"
+            return "[HeadAgent/LM Studio повернув лише порожній рядок]"
 
         return reply
 
