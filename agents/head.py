@@ -46,14 +46,29 @@ class HeadAgent:
         - якщо щось пішло не так — повертаємо зрозуміле повідомлення про помилку.
         """
         try:
-            cfg = self._get_llm_config_for_current_project()
-            base_url = os.getenv(
-                "LMSTUDIO_BASE_URL",
-                cfg.get("base_url", "http://127.0.0.1:1234/v1"),
-            )
-            model = os.getenv(
+            project = None
+            try:
+                project = get_current_project()
+            except Exception:
+                project = None
+            if isinstance(project, dict):
+                project = project.get("name")
+            if isinstance(project, str):
+                project = project.strip()
+            else:
+                project = None
+
+            cfg: Dict[str, str] = {}
+            if project:
+                try:
+                    cfg = get_llm_config(project)
+                except Exception:
+                    cfg = {}
+
+            base_url = cfg.get("base_url") or env_default_base_url()
+            model = cfg.get("head_model") or os.getenv(
                 "HEAD_MODEL",
-                cfg.get("head_model", "qwen2.5-7b-instruct-1m"),
+                "qwen2.5-7b-instruct-1m",
             )
             reply = chat_openai_compat(
                 base_url=base_url,
