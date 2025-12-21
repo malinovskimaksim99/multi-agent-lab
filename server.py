@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Any
-import subprocess
+import repo_tools as rt
 
 from agents.head import HeadAgent
 from db import (
@@ -69,96 +69,6 @@ def _load_memory() -> Any:
     return SimpleMemory()
 
 
-def _truncate(text: str, limit: int = 8000) -> str:
-    text = text or ""
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "…"
-
-
-def _run_cmd(cmd: list[str], timeout_s: int) -> tuple[int, str, str]:
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout_s,
-    )
-    return proc.returncode, proc.stdout or "", proc.stderr or ""
-
-
-def _cmd_error(cmd_str: str, code: int, out: str, err: str) -> str:
-    out = _truncate(out.strip())
-    err = _truncate(err.strip())
-    if err:
-        return f"{cmd_str} failed (code={code}): {err}"
-    if out:
-        return f"{cmd_str} failed (code={code}): {out}"
-    return f"{cmd_str} failed (code={code})"
-
-
-def _git_status() -> dict:
-    cmd = ["git", "status", "--porcelain=v1", "-b"]
-    code, out, err = _run_cmd(cmd, timeout_s=20)
-    if code != 0:
-        raise RuntimeError(_cmd_error("git status", code, out, err))
-    return {
-        "stdout": _truncate(out.strip()),
-        "stderr": _truncate(err.strip()),
-    }
-
-
-def _git_diff() -> dict:
-    cmd = ["git", "diff"]
-    code, out, err = _run_cmd(cmd, timeout_s=20)
-    if code != 0:
-        raise RuntimeError(_cmd_error("git diff", code, out, err))
-
-    if len(out) > 8000:
-        stat_code, stat_out, stat_err = _run_cmd(["git", "diff", "--stat"], timeout_s=20)
-        if stat_code != 0:
-            raise RuntimeError(_cmd_error("git diff --stat", stat_code, stat_out, stat_err))
-        return {
-            "truncated": True,
-            "stat": _truncate(stat_out.strip()),
-            "stderr": _truncate(stat_err.strip()),
-        }
-
-    return {
-        "truncated": False,
-        "diff": _truncate(out.strip()),
-        "stderr": _truncate(err.strip()),
-    }
-
-
-def _repo_search(query: str) -> dict:
-    cmd = [
-        "grep",
-        "-R",
-        "--line-number",
-        "--binary-files=without-match",
-        "--exclude-dir=.git",
-        "--exclude-dir=.venv",
-        "-m",
-        "50",
-        "--",
-        query,
-        ".",
-    ]
-    code, out, err = _run_cmd(cmd, timeout_s=20)
-    if code == 1:
-        return {
-            "found": False,
-            "matches": "",
-        }
-    if code != 0:
-        raise RuntimeError(_cmd_error("grep", code, out, err))
-    return {
-        "found": True,
-        "matches": _truncate(out.strip()),
-        "stderr": _truncate(err.strip()),
-    }
-
-
 # Глобальні екземпляри для API (щоб пам'ять жила між запитами)
 MEMORY = _load_memory()
 HEAD = HeadAgent()
@@ -198,20 +108,22 @@ class CurrentProjectUpdate(BaseModel):
 class SearchRequest(BaseModel):
     query: str
 
-
 @app.get("/", response_class=HTMLResponse)
-async def root() -> str:
+async def root() -> HTMLResponse:
     """
     Проста HTML-сторінка з мінімальним чат-інтерфейсом до /chat.
 
     Це тимчасовий "shell UI", щоб можна було клікати,
     не лізучи щоразу в /docs або curl.
     """
-    return """
+    html = """
     <!doctype html>
     <html lang="uk">
     <head>
         <meta charset="utf-8" />
+        <meta http-equiv="Cache-Control" content="no-store" />
+        <meta http-equiv="Pragma" content="no-cache" />
+        <meta http-equiv="Expires" content="0" />
         <title>multi-agent-lab — Chat</title>
         <style>
             body {
@@ -279,6 +191,11 @@ async def root() -> str:
                 justify-content: space-between;
                 gap: 8px;
             }
+            .header-actions {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
             .header-text {
                 flex: 1;
             }
@@ -334,6 +251,35 @@ async def root() -> str:
             }
             .btn-secondary:hover {
                 border-color: #4b5563;
+            }
+            .dev-actions {
+                display: flex;
+                gap: 6px;
+            }
+            .dev-search-row {
+                display: flex;
+                gap: 6px;
+                margin-bottom: 8px;
+            }
+            #dev-search-q {
+                flex: 1;
+                border-radius: 6px;
+                border: 1px solid #1f2933;
+                background: #0f172a;
+                color: #e5e7eb;
+                padding: 6px 8px;
+                font-size: 12px;
+                box-sizing: border-box;
+            }
+            #dev-output {
+                border-radius: 8px;
+                border: 1px solid #1f2933;
+                background: #0b1220;
+                color: #e5e7eb;
+                padding: 8px;
+                font-size: 12px;
+                white-space: pre-wrap;
+                font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
             }
             .chat-log {
                 flex: 1;
@@ -435,10 +381,8 @@ async def root() -> str:
             <div>
                 <strong>Проєкти:</strong>
                 <div id="projects-list" class="projects-list">
-                    <!-- Тимчасово — один проєкт. Після fetch /projects список оновиться. -->
-                    <div class="project-item active">
-                        <div class="project-name">Розробка</div>
-                        <div class="project-meta">dev</div>
+                    <div class="project-item">
+                        <div class="project-name">Завантаження...</div>
                     </div>
                 </div>
                 <small>Поки що цей UI працює з поточним проєктом.</small>
@@ -449,12 +393,30 @@ async def root() -> str:
                 <div class="header-text">
                     Простий чат з /chat (HeadAgent). Далі будемо розвивати до повного робочого середовища.
                 </div>
-                <button id="toggle-structure" class="btn-secondary">Структура ▼</button>
+                <div class="header-actions">
+                    <button id="toggle-structure" class="btn-secondary" type="button">Структура ▼</button>
+                    <button id="toggle-dev" class="btn-secondary" type="button">Dev ⚙︎</button>
+                </div>
+            </div>
+            <div id="dev-panel" class="structure-panel hidden">
+                <div class="structure-header-row">
+                    <div class="structure-header">Dev Panel</div>
+                    <div class="dev-actions">
+                        <button id="dev-refresh-status" class="btn-ghost" type="button">Status</button>
+                        <button id="dev-refresh-diff" class="btn-ghost" type="button">Diff</button>
+                        <button id="dev-refresh-errors" class="btn-ghost" type="button">Errors</button>
+                    </div>
+                </div>
+                <div class="dev-search-row">
+                    <input id="dev-search-q" placeholder="Search in repo..." />
+                    <button id="dev-search-btn" class="btn-ghost" type="button">Search</button>
+                </div>
+                <pre id="dev-output"></pre>
             </div>
             <div id="structure-panel" class="structure-panel hidden">
                 <div class="structure-header-row">
                     <div class="structure-header">Структура проєкту</div>
-                    <button id="refresh-outline" class="btn-ghost">Оновити</button>
+                    <button id="refresh-outline" class="btn-ghost" type="button">Оновити</button>
                 </div>
                 <div class="structure-body">
                     <p>Тут буде дерево: Книга → Глави → Сцени та ключові сюжетні розгалуження.</p>
@@ -465,7 +427,7 @@ async def root() -> str:
             <div class="input-bar">
                 <div class="row">
                     <textarea id="task" placeholder="Напишіть запит, наприклад: Склади план розвитку multi-agent-lab."></textarea>
-                    <button id="send">Send</button>
+                    <button id="send" type="button">Send</button>
                 </div>
                 <div class="meta-row">
                     <label>
@@ -477,24 +439,51 @@ async def root() -> str:
             </div>
         </div>
         <script>
-
-
             const taskEl = document.getElementById('task');
             const autoEl = document.getElementById('auto');
             const sendBtn = document.getElementById('send');
             const logEl = document.getElementById('log');
             const statusEl = document.getElementById('status');
             const toggleStructureBtn = document.getElementById('toggle-structure');
+            const toggleDevBtn = document.getElementById('toggle-dev');
             const structurePanel = document.getElementById('structure-panel');
             const structureBody = document.querySelector('.structure-body');
             const refreshOutlineBtn = document.getElementById('refresh-outline');
             const projectsListEl = document.getElementById('projects-list');
+            const devPanel = document.getElementById('dev-panel');
+            const devOutput = document.getElementById('dev-output');
+            const devSearchInput = document.getElementById('dev-search-q');
+            const devSearchBtn = document.getElementById('dev-search-btn');
+            const devRefreshStatusBtn = document.getElementById('dev-refresh-status');
+            const devRefreshDiffBtn = document.getElementById('dev-refresh-diff');
+            const devRefreshErrorsBtn = document.getElementById('dev-refresh-errors');
             let structureVisible = false;
             let outlineLoaded = false;
+            let devVisible = false;
             // Поточний проєкт, обраний у сайдбарі
             let currentProjectId = null;
             let currentProjectType = null;
             let currentProjectName = null;
+
+            if (statusEl) {
+                statusEl.textContent = 'UI JS loaded';
+                statusEl.classList.remove('error');
+            }
+
+            function reportUiError(message) {
+                if (!statusEl) return;
+                statusEl.textContent = 'UI error: ' + message;
+                statusEl.classList.add('error');
+            }
+
+            window.addEventListener('error', (e) => {
+                const msg = e && e.message ? e.message : 'unknown';
+                reportUiError(msg);
+            });
+            window.addEventListener('unhandledrejection', (e) => {
+                const msg = e && e.reason ? e.reason : 'unhandled rejection';
+                reportUiError(msg);
+            });
 
             async function loadCurrentProjectName() {
                 try {
@@ -513,6 +502,7 @@ async def root() -> str:
                     return null;
                 } catch (err) {
                     console.error(err);
+                    reportUiError(err.message || err);
                     return null;
                 }
             }
@@ -521,6 +511,8 @@ async def root() -> str:
                 if (!projectsListEl) return;
 
                 try {
+                    projectsListEl.innerHTML =
+                        '<div class="project-item"><div class="project-name">Завантаження...</div></div>';
                     currentProjectName = await loadCurrentProjectName();
                     const resp = await fetch('/projects');
                     if (!resp.ok) {
@@ -528,8 +520,13 @@ async def root() -> str:
                     }
                     const data = await resp.json();
                     renderProjects(data.projects || [], currentProjectName);
+                    if (statusEl) {
+                        statusEl.textContent = 'Projects loaded';
+                        statusEl.classList.remove('error');
+                    }
                 } catch (err) {
                     console.error(err);
+                    reportUiError(err.message || err);
                     projectsListEl.innerHTML =
                         '<div class="project-item"><div class="project-name">Помилка завантаження проєктів</div></div>';
                 }
@@ -607,6 +604,7 @@ async def root() -> str:
                             }
                         } catch (err) {
                             console.error(err);
+                            reportUiError(err.message || err);
                         }
                     });
                 });
@@ -634,6 +632,121 @@ async def root() -> str:
                     loadOutlineForCurrentProject();
                 });
             }
+
+            function setDevOutput(text) {
+                if (!devOutput) return;
+                devOutput.textContent = text || '';
+            }
+
+            async function loadDevStatus() {
+                try {
+                    const resp = await fetch('/dev/git/status');
+                    if (!resp.ok) {
+                        throw new Error('HTTP ' + resp.status);
+                    }
+                    const data = await resp.json();
+                    setDevOutput(JSON.stringify(data, null, 2));
+                } catch (err) {
+                    setDevOutput('ERROR: ' + err.message);
+                }
+            }
+
+            async function loadDevDiff() {
+                try {
+                    const resp = await fetch('/dev/git/diff');
+                    if (!resp.ok) {
+                        throw new Error('HTTP ' + resp.status);
+                    }
+                    const data = await resp.json();
+                    if (data && data.ok && data.data) {
+                        if (data.data.truncated) {
+                            setDevOutput(data.data.stat || '');
+                        } else {
+                            setDevOutput(data.data.diff || '');
+                        }
+                        return;
+                    }
+                    setDevOutput(JSON.stringify(data, null, 2));
+                } catch (err) {
+                    setDevOutput('ERROR: ' + err.message);
+                }
+            }
+
+            async function loadDevErrors() {
+                try {
+                    const resp = await fetch('/dev/errors?limit=5');
+                    if (!resp.ok) {
+                        throw new Error('HTTP ' + resp.status);
+                    }
+                    const data = await resp.json();
+                    setDevOutput(JSON.stringify(data, null, 2));
+                } catch (err) {
+                    setDevOutput('ERROR: ' + err.message);
+                }
+            }
+
+            async function devSearch() {
+                if (!devSearchInput) return;
+                const query = devSearchInput.value.trim();
+                try {
+                    const resp = await fetch('/dev/search', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            query: query
+                        })
+                    });
+                    if (!resp.ok) {
+                        throw new Error('HTTP ' + resp.status);
+                    }
+                    const data = await resp.json();
+                    if (data && data.ok && data.data) {
+                        const found = !!data.data.found;
+                        const matches = data.data.matches || '';
+                        const header = 'found: ' + found;
+                        setDevOutput(matches ? header + '\\n' + matches : header);
+                        return;
+                    }
+                    setDevOutput(JSON.stringify(data, null, 2));
+                } catch (err) {
+                    setDevOutput('ERROR: ' + err.message);
+                }
+            }
+
+            if (toggleDevBtn && devPanel) {
+                toggleDevBtn.addEventListener('click', () => {
+                    devVisible = !devVisible;
+                    if (devVisible) {
+                        devPanel.classList.remove('hidden');
+                    } else {
+                        devPanel.classList.add('hidden');
+                    }
+                });
+            }
+
+            if (devRefreshStatusBtn) {
+                devRefreshStatusBtn.addEventListener('click', () => {
+                    loadDevStatus();
+                });
+            }
+            if (devRefreshDiffBtn) {
+                devRefreshDiffBtn.addEventListener('click', () => {
+                    loadDevDiff();
+                });
+            }
+            if (devRefreshErrorsBtn) {
+                devRefreshErrorsBtn.addEventListener('click', () => {
+                    loadDevErrors();
+                });
+            }
+            if (devSearchBtn) {
+                devSearchBtn.addEventListener('click', () => {
+                    devSearch();
+                });
+            }
+
             function loadOutlineForCurrentProject() {
                 if (!structureBody) return;
 
@@ -799,6 +912,10 @@ async def root() -> str:
     </body>
     </html>
     """
+    return HTMLResponse(
+        content=html,
+        headers={"Cache-Control": "no-store"},
+    )
 
 @app.get("/health")
 async def health() -> dict:
@@ -810,7 +927,7 @@ async def health() -> dict:
 @app.get("/dev/git/status")
 async def dev_git_status() -> dict:
     try:
-        data = _git_status()
+        data = rt.git_status()
         return {"ok": True, "data": data}
     except Exception as exc:
         return JSONResponse(
@@ -822,7 +939,7 @@ async def dev_git_status() -> dict:
 @app.get("/dev/git/diff")
 async def dev_git_diff() -> dict:
     try:
-        data = _git_diff()
+        data = rt.git_diff()
         return {"ok": True, "data": data}
     except Exception as exc:
         return JSONResponse(
@@ -840,8 +957,13 @@ async def dev_search(req: SearchRequest) -> dict:
             content={"ok": False, "error": "Field required: query"},
         )
     try:
-        data = _repo_search(query)
+        data = rt.repo_search(query)
         return {"ok": True, "data": data}
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "error": str(exc)},
+        )
     except Exception as exc:
         return JSONResponse(
             status_code=500,

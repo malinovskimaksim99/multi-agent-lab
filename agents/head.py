@@ -8,6 +8,8 @@ import subprocess
 
 from typing import Any, Dict, Optional
 
+import repo_tools as rt
+
 from .supervisor import Supervisor
 
 from db import (
@@ -241,108 +243,6 @@ class HeadAgent:
         if err:
             parts.append("\n[stderr]\n" + self._truncate(err))
 
-        return "\n".join(parts)
-
-    def _run_git(self, args: list[str], timeout_s: int = 20) -> str:
-        cmd = ["git"] + args
-        cmd_str = "git " + " ".join(args)
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout_s,
-            )
-        except subprocess.TimeoutExpired:
-            return f"[git] {cmd_str}\nreturn_code=timeout\n[stderr]\nTimeout ({timeout_s}s)"
-        except Exception as e:
-            return f"[git] {cmd_str}\nreturn_code=error\n[stderr]\n{e}"
-
-        out = (proc.stdout or "").strip()
-        err = (proc.stderr or "").strip()
-
-        parts = [f"[git] {cmd_str}", f"return_code={proc.returncode}"]
-        if out:
-            parts.append("\n[stdout]\n" + self._truncate(out))
-        if err:
-            parts.append("\n[stderr]\n" + self._truncate(err))
-
-        return "\n".join(parts)
-
-    def _run_git_status(self) -> str:
-        return self._run_git(["status", "--porcelain=v1", "-b"])
-
-    def _run_git_diff(self) -> str:
-        cmd = ["git", "diff"]
-        cmd_str = "git diff"
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=20,
-            )
-        except subprocess.TimeoutExpired:
-            return f"[git] {cmd_str}\nreturn_code=timeout\n[stderr]\nTimeout (20s)"
-        except Exception as e:
-            return f"[git] {cmd_str}\nreturn_code=error\n[stderr]\n{e}"
-
-        out = proc.stdout or ""
-        err = proc.stderr or ""
-
-        if len(out) > 8000:
-            stat = self._run_git(["diff", "--stat"])
-            return "diff truncated, showing --stat\n" + stat
-
-        out = out.strip()
-        err = err.strip()
-        parts = [f"[git] {cmd_str}", f"return_code={proc.returncode}"]
-        if out:
-            parts.append("\n[stdout]\n" + self._truncate(out))
-        if err:
-            parts.append("\n[stderr]\n" + self._truncate(err))
-        return "\n".join(parts)
-
-    def _repo_search(self, query: str) -> str:
-        q = (query or "").strip()
-        if len(q) < 2:
-            return "Підкажи, що шукати, наприклад: 'знайди в репо head.py'."
-
-        cmd = [
-            "grep",
-            "-R",
-            "--line-number",
-            "--binary-files=without-match",
-            "--exclude-dir=.git",
-            "--exclude-dir=.venv",
-            "-m",
-            "50",
-            "--",
-            q,
-            ".",
-        ]
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=20,
-            )
-        except subprocess.TimeoutExpired:
-            return "[grep] Timeout (20s): пошук виконується занадто довго."
-        except Exception as e:
-            return f"[grep] Не вдалося виконати пошук: {e}"
-
-        if proc.returncode == 1:
-            return "нічого не знайдено"
-
-        out = (proc.stdout or "").strip()
-        err = (proc.stderr or "").strip()
-        parts = [f"[grep] {q}", f"return_code={proc.returncode}"]
-        if out:
-            parts.append("\n[stdout]\n" + self._truncate(out))
-        if err:
-            parts.append("\n[stderr]\n" + self._truncate(err))
         return "\n".join(parts)
 
     def _should_delegate(self, user_text: str) -> bool:
@@ -717,7 +617,20 @@ class HeadAgent:
                 "перевір статус репозиторію",
             )
         ):
-            result = self._run_git_status()
+            try:
+                data = rt.git_status()
+                parts = ["[git] git status --porcelain=v1 -b", "return_code=0"]
+                if data.get("stdout"):
+                    parts.append("\n[stdout]\n" + data["stdout"])
+                if data.get("stderr"):
+                    parts.append("\n[stderr]\n" + data["stderr"])
+                result = "\n".join(parts)
+            except Exception as e:
+                result = (
+                    "[git] git status --porcelain=v1 -b\n"
+                    "return_code=error\n"
+                    f"[stderr]\n{e}"
+                )
             self._log_head_note(clean, result)
             return result
 
@@ -729,7 +642,24 @@ class HeadAgent:
                 "покажи зміни",
             )
         ):
-            result = self._run_git_diff()
+            try:
+                data = rt.git_diff()
+                if data.get("truncated"):
+                    stat_parts = ["[git] git diff --stat", "return_code=0"]
+                    if data.get("stat"):
+                        stat_parts.append("\n[stdout]\n" + data["stat"])
+                    if data.get("stderr"):
+                        stat_parts.append("\n[stderr]\n" + data["stderr"])
+                    result = "diff truncated, showing --stat\n" + "\n".join(stat_parts)
+                else:
+                    parts = ["[git] git diff", "return_code=0"]
+                    if data.get("diff"):
+                        parts.append("\n[stdout]\n" + data["diff"])
+                    if data.get("stderr"):
+                        parts.append("\n[stderr]\n" + data["stderr"])
+                    result = "\n".join(parts)
+            except Exception as e:
+                result = "[git] git diff\nreturn_code=error\n[stderr]\n" + str(e)
             self._log_head_note(clean, result)
             return result
 
@@ -744,7 +674,23 @@ class HeadAgent:
             search_query = clean[len("пошук в репо") :].strip(" :")
 
         if search_query is not None:
-            result = self._repo_search(search_query)
+            if len(search_query) < 2:
+                result = "Підкажи, що шукати, наприклад: 'знайди в репо head.py'."
+                self._log_head_note(clean, result)
+                return result
+            try:
+                data = rt.repo_search(search_query)
+                if not data.get("found"):
+                    result = "нічого не знайдено"
+                else:
+                    parts = [f"[grep] {search_query}", "return_code=0"]
+                    if data.get("matches"):
+                        parts.append("\n[stdout]\n" + data["matches"])
+                    if data.get("stderr"):
+                        parts.append("\n[stderr]\n" + data["stderr"])
+                    result = "\n".join(parts)
+            except Exception as e:
+                result = f"[grep] Не вдалося виконати пошук: {e}"
             self._log_head_note(clean, result)
             return result
 
