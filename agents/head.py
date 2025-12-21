@@ -17,6 +17,7 @@ from db import (
     get_recent_errors,  # ми вже додавали це раніше
     add_head_note,
     get_head_notes,
+    get_llm_config,
 )
 
 from .head_profile import build_head_system_prompt
@@ -45,8 +46,15 @@ class HeadAgent:
         - якщо щось пішло не так — повертаємо зрозуміле повідомлення про помилку.
         """
         try:
-            base_url = env_default_base_url()
-            model = os.getenv("HEAD_MODEL", "qwen2.5-7b-instruct-1m")
+            cfg = self._get_llm_config_for_current_project()
+            base_url = os.getenv(
+                "LMSTUDIO_BASE_URL",
+                cfg.get("base_url", "http://127.0.0.1:1234/v1"),
+            )
+            model = os.getenv(
+                "HEAD_MODEL",
+                cfg.get("head_model", "qwen2.5-7b-instruct-1m"),
+            )
             reply = chat_openai_compat(
                 base_url=base_url,
                 model=model,
@@ -68,6 +76,21 @@ class HeadAgent:
             return "[HeadAgent/LM Studio повернув лише порожній рядок]"
 
         return reply
+
+    def _get_llm_config_for_current_project(self) -> Dict[str, str]:
+        """
+        Повертає LLM-конфіг для поточного проєкту або дефолтні значення.
+        """
+        try:
+            project_name = self._get_current_project_name()
+            if project_name:
+                return get_llm_config(project_name)
+        except Exception:
+            pass
+        return {
+            "base_url": env_default_base_url(),
+            "head_model": os.getenv("HEAD_MODEL", "qwen2.5-7b-instruct-1m"),
+        }
 
     def _get_current_project_name(self) -> Optional[str]:
         """Повертає назву поточного проєкту (якщо є), інакше None."""
