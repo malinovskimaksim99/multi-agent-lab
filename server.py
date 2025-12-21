@@ -12,6 +12,10 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Any
 import repo_tools as rt
+try:
+    import tools_allowlist as ta
+except Exception:
+    ta = None  # type: ignore
 
 from agents.head import HeadAgent
 from db import (
@@ -107,6 +111,12 @@ class CurrentProjectUpdate(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str
+
+
+class ToolRunRequest(BaseModel):
+    name: str
+    args: Optional[dict] = None
+
 
 @app.get("/", response_class=HTMLResponse)
 async def root() -> HTMLResponse:
@@ -959,6 +969,55 @@ async def dev_search(req: SearchRequest) -> dict:
     try:
         data = rt.repo_search(query)
         return {"ok": True, "data": data}
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "error": str(exc)},
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": str(exc)},
+        )
+
+
+@app.get("/dev/tools")
+async def dev_tools() -> list[dict]:
+    if ta is None:
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "error": "tools_allowlist not available"},
+        )
+    return ta.list_tools()
+
+
+@app.post("/dev/tools/run")
+async def dev_tools_run(req: ToolRunRequest) -> dict:
+    name = (req.name or "").strip()
+    if ta is None:
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "error": "tools_allowlist not available"},
+        )
+    if not name:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "error": "Field required: name"},
+        )
+    args = req.args or {}
+    if not isinstance(args, dict):
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "error": "Field required: args object"},
+        )
+    try:
+        result = ta.run_tool(name, args)
+        if result.get("ok"):
+            return result
+        return JSONResponse(
+            status_code=500,
+            content=result,
+        )
     except ValueError as exc:
         return JSONResponse(
             status_code=422,
