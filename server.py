@@ -18,9 +18,11 @@ from db import (
     get_book_outline,
     get_writing_projects,
     get_current_project,
+    set_current_project,
     bootstrap_db,
     get_llm_config,
     set_project_setting,
+    ensure_writing_project_for_project_id,
 )
 
 
@@ -95,6 +97,10 @@ class LLMConfigUpdate(BaseModel):
     base_url: Optional[str] = None
     head_model: Optional[str] = None
     writer_model: Optional[str] = None
+
+
+class CurrentProjectUpdate(BaseModel):
+    project: str
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -392,17 +398,40 @@ async def root() -> str:
             // Поточний проєкт, обраний у сайдбарі
             let currentProjectId = null;
             let currentProjectType = null;
+            let currentProjectName = null;
+
+            async function loadCurrentProjectName() {
+                try {
+                    const resp = await fetch('/projects/current');
+                    if (!resp.ok) {
+                        return null;
+                    }
+                    const data = await resp.json();
+                    const project = data.project;
+                    if (typeof project === 'string') {
+                        return project;
+                    }
+                    if (project && typeof project.name === 'string') {
+                        return project.name;
+                    }
+                    return null;
+                } catch (err) {
+                    console.error(err);
+                    return null;
+                }
+            }
 
             async function loadProjects() {
                 if (!projectsListEl) return;
 
                 try {
+                    currentProjectName = await loadCurrentProjectName();
                     const resp = await fetch('/projects');
                     if (!resp.ok) {
                         throw new Error('HTTP ' + resp.status);
                     }
                     const data = await resp.json();
-                    renderProjects(data.projects || []);
+                    renderProjects(data.projects || [], currentProjectName);
                 } catch (err) {
                     console.error(err);
                     projectsListEl.innerHTML =
@@ -410,7 +439,7 @@ async def root() -> str:
                 }
             }
 
-            function renderProjects(projects) {
+            function renderProjects(projects, currentName) {
                 if (!projectsListEl) return;
 
                 if (!projects.length) {
@@ -423,8 +452,8 @@ async def root() -> str:
 
                 let html = '';
                 for (const p of projects) {
-                    const isActive = (p.status === 'active');
-                    // Якщо ще не обрано поточний проєкт — беремо перший active
+                    const isActive = (p.name === currentName);
+                    // Якщо ще не обрано поточний проєкт — беремо активний з currentName
                     if (isActive && currentProjectId === null) {
                         currentProjectId = p.id;
                         currentProjectType = p.type || null;
@@ -443,18 +472,45 @@ async def root() -> str:
                 // Навішуємо клік‑обробники для вибору поточного проєкту
                 const items = projectsListEl.querySelectorAll('.project-item');
                 items.forEach((el) => {
-                    el.addEventListener('click', () => {
-                        const pid = el.getAttribute('data-project-id');
-                        const ptype = el.getAttribute('data-project-type') || null;
-                        currentProjectId = pid ? parseInt(pid, 10) : null;
-                        currentProjectType = ptype;
+                    el.addEventListener('click', async () => {
+                        const name = (el.querySelector('.project-name') || {}).textContent || '';
+                        try {
+                            const resp = await fetch('/projects/current', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    project: name
+                                })
+                            });
+                            if (!resp.ok) {
+                                throw new Error('HTTP ' + resp.status);
+                            }
+                            const data = await resp.json();
+                            const project = data.project;
+                            if (typeof project === 'string') {
+                                currentProjectName = project;
+                            } else if (project && typeof project.name === 'string') {
+                                currentProjectName = project.name;
+                            } else {
+                                currentProjectName = name;
+                            }
 
-                        items.forEach((i) => i.classList.remove('active'));
-                        el.classList.add('active');
+                            const pid = el.getAttribute('data-project-id');
+                            const ptype = el.getAttribute('data-project-type') || null;
+                            currentProjectId = pid ? parseInt(pid, 10) : null;
+                            currentProjectType = ptype;
 
-                        // Якщо відкрита панель структури — оновлюємо її для вибраного проєкту
-                        if (structureVisible) {
-                            loadOutlineForCurrentProject();
+                            items.forEach((i) => i.classList.remove('active'));
+                            el.classList.add('active');
+
+                            // Якщо відкрита панель структури — оновлюємо її для вибраного проєкту
+                            if (structureVisible) {
+                                loadOutlineForCurrentProject();
+                            }
+                        } catch (err) {
+                            console.error(err);
                         }
                     });
                 });
@@ -699,6 +755,15 @@ async def current_project() -> dict:
     return {"project": project}
 
 
+@app.post("/projects/current")
+async def set_current_project_api(update: CurrentProjectUpdate) -> dict:
+    name = (update.project or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Field required: project")
+    set_current_project(name)
+    return {"project": get_current_project()}
+
+
 # --- LLM config endpoints for current project ---
 
 @app.get("/projects/current/llm_config")
@@ -743,15 +808,11 @@ async def writing_outline(project_id: int | None = None, book_id: int | None = N
 
     # Якщо не передали book_id, але є project_id — шукаємо книгу для цього проєкту.
     if book_id is None and project_id is not None:
-        writing_projects = get_writing_projects()
-        candidates = [p for p in writing_projects if p.get("project_id") == project_id]
-        if not candidates:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No writing project (book) found for project_id={project_id}",
-            )
-        # Беремо перший як основну книгу для цього проєкту.
-        book_id = candidates[0]["id"]
+        try:
+            book = ensure_writing_project_for_project_id(project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        book_id = int(book["id"])
 
     assert book_id is not None
     try:
@@ -760,6 +821,13 @@ async def writing_outline(project_id: int | None = None, book_id: int | None = N
         # Якщо книга не знайдена, повертаємо 404
         raise HTTPException(status_code=404, detail=str(exc))
     return outline
+
+
+@app.get("/writing/projects")
+async def writing_projects(project_name: Optional[str] = None) -> dict:
+    name = (project_name or "").strip() or None
+    books = get_writing_projects(project_name=name)
+    return {"project_name": name, "books": books}
 
 
 if __name__ == "__main__":

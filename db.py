@@ -872,16 +872,17 @@ def create_project(
 ) -> None:
     """
     Створює новий проєкт, якщо з таким ім'ям ще немає.
+
+    Якщо type_ == "writing" — гарантує наявність відповідного запису у writing_projects
+    (щоб /writing/outline міг одразу працювати).
     """
     conn = get_connection()
     cur = conn.cursor()
     now = datetime.now(timezone.utc).isoformat()
 
-    cur.execute(
-        "SELECT id FROM projects WHERE name = ?",
-        (name,),
-    )
+    cur.execute("SELECT id, type FROM projects WHERE name = ?", (name,))
     row = cur.fetchone()
+
     if not row:
         cur.execute(
             """
@@ -890,9 +891,46 @@ def create_project(
             """,
             (name, type_, description, status, now, now),
         )
+    else:
+        project_id = int(row["id"])
+        existing_type = row["type"]
+
+        if type_ and existing_type != type_:
+            cur.execute(
+                """
+                UPDATE projects
+                SET type = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (type_, now, project_id),
+            )
+
+        if description:
+            cur.execute(
+                """
+                UPDATE projects
+                SET description = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (description, now, project_id),
+            )
+
+        if status:
+            cur.execute(
+                """
+                UPDATE projects
+                SET status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, now, project_id),
+            )
 
     conn.commit()
     conn.close()
+
+    # Якщо це письменницький проєкт — гарантуємо наявність "книги" у writing_projects
+    if type_ == "writing":
+        create_writing_project(project_name=name, title=name)
 
 
 def get_projects() -> List[Dict[str, Any]]:
@@ -1260,6 +1298,83 @@ def set_current_project(name: str) -> None:
 # ----------------- Writing projects helpers -----------------
 
 
+def ensure_writing_project_for_project_id(
+    project_id: int,
+    title: Optional[str] = None,
+    synopsis: str = "",
+) -> Dict[str, Any]:
+    """
+    Гарантує, що для projects.id = project_id існує запис у writing_projects.
+
+    Повертає dict з даними книги (writing_projects row).
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+
+    cur.execute("SELECT id, name, type FROM projects WHERE id = ?", (project_id,))
+    prow = cur.fetchone()
+    if not prow:
+        conn.close()
+        raise ValueError(f"Project with id={project_id} not found")
+
+    project_name = str(prow["name"])
+    ptype = str(prow["type"] or "")
+    if ptype != "writing":
+        cur.execute(
+            """
+            UPDATE projects
+            SET type = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("writing", now, project_id),
+        )
+
+    effective_title = title or project_name
+
+    cur.execute(
+        """
+        SELECT id, title, status, synopsis
+        FROM writing_projects
+        WHERE project_id = ?
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (project_id,),
+    )
+    wrow = cur.fetchone()
+    if wrow:
+        result = {
+            "id": wrow["id"],
+            "project_id": project_id,
+            "title": wrow["title"],
+            "status": wrow["status"],
+            "synopsis": wrow["synopsis"],
+        }
+        conn.close()
+        return result
+
+    cur.execute(
+        """
+        INSERT INTO writing_projects (project_id, title, status, synopsis, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (project_id, effective_title, "active", synopsis, now, now),
+    )
+    book_id = cur.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "id": book_id,
+        "project_id": project_id,
+        "title": effective_title,
+        "status": "active",
+        "synopsis": synopsis,
+    }
+
+
 def create_writing_project(
     project_name: str,
     title: Optional[str] = None,
@@ -1284,6 +1399,16 @@ def create_writing_project(
     row = cur.fetchone()
     if row:
         project_id = row["id"]
+        # Якщо проєкт існує, але не позначений як writing — виправимо це.
+        if (row["type"] or "") != "writing":
+            cur.execute(
+                """
+                UPDATE projects
+                SET type = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ("writing", now, project_id),
+            )
     else:
         cur.execute(
             """
