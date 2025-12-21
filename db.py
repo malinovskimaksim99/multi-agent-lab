@@ -858,6 +858,12 @@ def ensure_default_project() -> str:
     return name
 
 
+def bootstrap_db() -> None:
+    """Явно ініціалізує БД і гарантує дефолтний проєкт."""
+    init_db()
+    ensure_default_project()
+
+
 def create_project(
     name: str,
     type_: str = "generic",
@@ -924,7 +930,6 @@ def get_projects() -> List[Dict[str, Any]]:
 
 # ----------------- HeadAgent helpers -----------------
 
-from typing import Any, Dict, List, Optional
 
 def get_project_id_by_name(name: str) -> Optional[int]:
     """Повертає id проєкту за його назвою або None, якщо не знайдено."""
@@ -1593,5 +1598,3 @@ def get_solver_stats_by_task_type(task_type: str) -> Dict[str, int]:
         return stats
     finally:
         conn.close()
-init_db()
-ensure_default_project()

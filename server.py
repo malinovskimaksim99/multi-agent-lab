@@ -13,11 +13,16 @@ from pydantic import BaseModel
 from typing import Optional, Any
 
 from agents.head import HeadAgent
-from db import get_projects, get_book_outline, get_writing_projects, get_current_project
+from db import get_projects, get_book_outline, get_writing_projects, get_current_project, bootstrap_db
 
 
 
 app = FastAPI(title="multi-agent-lab API")
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    bootstrap_db()
 
 
 def _load_memory() -> Any:

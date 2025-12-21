@@ -7,6 +7,7 @@ from agents.registry import list_agents
 from agents.router import rank_agents
 from agents.supervisor import Supervisor
 from commands import match_command
+from db import bootstrap_db
 from memory.store import load_memory, save_memory
 
 
@@ -89,6 +90,7 @@ def main() -> None:
     parser.add_argument("--team-size", type=int, default=2, help="Team size for --team mode.")
     args = parser.parse_args()
 
+    bootstrap_db()
     memory = load_memory()
 
     sup = Supervisor(
